@@ -40,7 +40,9 @@ func NewSendMessage(route, payload string) *SendMessage {
 }
 
 func (c *SendMessage) Serialize() string {
-	return strings.Join([]string{c.CmdType, c.ID, c.Route, c.Payload}, delimiter)
+	return strings.Join(
+		[]string{c.CmdType, c.ID, c.Route, c.Payload}, delimiter,
+	)
 }
 
 // -------Add Subscriber--------------------------------------------------------
@@ -64,7 +66,9 @@ func NewAddSubscriber(route, channel, address string) *AddSubscriber {
 }
 
 func (c *AddSubscriber) Serialize() string {
-	return strings.Join([]string{c.CmdType, c.ID, c.Route, c.Channel, c.Address}, delimiter)
+	return strings.Join(
+		[]string{c.CmdType, c.ID, c.Route, c.Channel, c.Address}, delimiter,
+	)
 }
 
 // -------Add Channel-----------------------------------------------------------
