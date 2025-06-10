@@ -115,6 +115,7 @@ func (c *AddRoute) Serialize() string {
 
 // -------Command Processing----------------------------------------------------
 
+// Formats the address for friendly IPv6 or IPv4 based on contained characterse.
 func formatAddress(host string, port int) string {
 	if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") {
 		// Likely an IPv6 address
@@ -123,6 +124,7 @@ func formatAddress(host string, port int) string {
 	return fmt.Sprintf("%s:%d", host, port)
 }
 
+// Sends the command to the Mycelia client at the given address + port.
 func ProcessCommand(cmd CommandType, address string, port int) error {
 	payload := cmd.Serialize()
 	fullAddr := formatAddress(address, port)
