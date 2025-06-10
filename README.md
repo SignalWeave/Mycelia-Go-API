@@ -1,5 +1,5 @@
-# Mycelium-Go-Client
-Mycelium Golang Client
+# Mycelium-Go-API
+Mycelium Golang API
 
 ## Usage
 
@@ -10,7 +10,7 @@ Define a command type and then call `process_command(cmd)`.
 ```go
 package main
 
-import "https://github.com/SignalWeave/Mycelia-Go-Client"
+import "https://github.com/SignalWeave/Mycelia-Go-API"
 
 var address string = "127.0.0.1"
 var port int = 5000
