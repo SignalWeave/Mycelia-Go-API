@@ -1,4 +1,4 @@
-module mycelia-client
+module mycelia-api
 
 go 1.22.1
 
