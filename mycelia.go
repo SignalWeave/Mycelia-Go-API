@@ -19,11 +19,14 @@ const (
 	// should use to decode data fields.
 	API_VERSION = 1
 
-	CMD_SEND_MESSAGE    = "send_message"
-	CMD_ADD_ROUTE       = "add_route"
-	CMD_ADD_CHANNEL     = "add_channel"
-	CMD_ADD_SUBSCRIBER  = "add_subscriber"
-	CMD_ADD_TRANSFORMER = "add_transformer"
+	// Version 1 of the command API does not support sub-command parsing.
+	// The <object>.<action> syntax is the conform to future version feature
+	// syntax.
+	CMD_SEND_MESSAGE    = "MESSAGE.ADD"
+	CMD_ADD_ROUTE       = "ROUTE.ADD"
+	CMD_ADD_CHANNEL     = "CHANNEL.ADD"
+	CMD_ADD_TRANSFORMER = "TRANSFORMER.ADD"
+	CMD_ADD_SUBSCRIBER  = "SUBSCRIBER.ADD"
 )
 
 type CommandType interface {
