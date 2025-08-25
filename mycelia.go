@@ -1,9 +1,15 @@
 package mycelia
 
 import (
+	"bufio"
+	"bytes"
+	"encoding/binary"
+	"errors"
 	"fmt"
+	"io"
 	"net"
-	"strings"
+	"strconv"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -11,24 +17,24 @@ import (
 const delimiter = ";;"
 
 const (
+	// The integer version number of which protocol version the remote broker
+	// should use to decode data fields.
+	API_VERSION = 1
+
 	CMD_SEND_MESSAGE    = "send_message"
-	CMD_ADD_SUBSCRIBER  = "add_subscriber"
-	CMD_ADD_CHANNEL     = "add_channel"
 	CMD_ADD_ROUTE       = "add_route"
+	CMD_ADD_CHANNEL     = "add_channel"
+	CMD_ADD_SUBSCRIBER  = "add_subscriber"
 	CMD_ADD_TRANSFORMER = "add_transformer"
 )
 
-// The integer version number of which protocol version the remote broker should
-// use to decode data fields.
-// Can be set by user if needed.
-var ProtocolVerison = "1"
-
 type CommandType interface {
-	Serialize() string
+	SerializeFields() []string
 }
 
 // -------Send Message----------------------------------------------------------
 
+// SendMessage sends a payload through a route.
 type SendMessage struct {
 	ProtoVer string
 	CmdType  string
@@ -37,24 +43,23 @@ type SendMessage struct {
 	Payload  string
 }
 
-func NewSendMessage(route, payload string) *SendMessage {
+func NewSendMessage(route, payload string, protoVer int) *SendMessage {
 	return &SendMessage{
-		ProtoVer: ProtocolVerison,
+		ProtoVer: strconv.Itoa(protoVer),
 		CmdType:  CMD_SEND_MESSAGE,
-		ID:       uuid.New().String(),
+		ID:       uuid.NewString(),
 		Route:    route,
 		Payload:  payload,
 	}
 }
 
-func (c *SendMessage) Serialize() string {
-	return strings.Join(
-		[]string{c.ProtoVer, c.CmdType, c.ID, c.Route, c.Payload}, delimiter,
-	)
+func (c *SendMessage) SerializeFields() []string {
+	return []string{c.ProtoVer, c.CmdType, c.ID, c.Route, c.Payload}
 }
 
 // -------Add Subscriber--------------------------------------------------------
 
+// AddSubscriber registers a subscriber at address on route+channel.
 type AddSubscriber struct {
 	ProtoVer string
 	CmdType  string
@@ -64,26 +69,29 @@ type AddSubscriber struct {
 	Address  string
 }
 
-func NewAddSubscriber(route, channel, address string) *AddSubscriber {
+func NewAddSubscriber(
+	route,
+	channel,
+	address string,
+	protoVer int,
+) *AddSubscriber {
 	return &AddSubscriber{
-		ProtoVer: ProtocolVerison,
+		ProtoVer: strconv.Itoa(protoVer),
 		CmdType:  CMD_ADD_SUBSCRIBER,
-		ID:       uuid.New().String(),
+		ID:       uuid.NewString(),
 		Route:    route,
 		Channel:  channel,
 		Address:  address,
 	}
 }
 
-func (c *AddSubscriber) Serialize() string {
-	return strings.Join(
-		[]string{c.ProtoVer, c.CmdType, c.ID, c.Route, c.Channel, c.Address},
-		delimiter,
-	)
+func (c *AddSubscriber) SerializeFields() []string {
+	return []string{c.ProtoVer, c.CmdType, c.ID, c.Route, c.Channel, c.Address}
 }
 
 // -------Add Channel-----------------------------------------------------------
 
+// AddChannel adds a channel to a route.
 type AddChannel struct {
 	ProtoVer string
 	CmdType  string
@@ -92,24 +100,23 @@ type AddChannel struct {
 	Name     string
 }
 
-func NewAddChannel(route, name string) *AddChannel {
+func NewAddChannel(route, name string, protoVer int) *AddChannel {
 	return &AddChannel{
-		ProtoVer: ProtocolVerison,
+		ProtoVer: strconv.Itoa(protoVer),
 		CmdType:  CMD_ADD_CHANNEL,
-		ID:       uuid.New().String(),
+		ID:       uuid.NewString(),
 		Route:    route,
 		Name:     name,
 	}
 }
 
-func (c *AddChannel) Serialize() string {
-	return strings.Join([]string{c.ProtoVer, c.CmdType, c.ID, c.Route, c.Name},
-		delimiter,
-	)
+func (c *AddChannel) SerializeFields() []string {
+	return []string{c.ProtoVer, c.CmdType, c.ID, c.Route, c.Name}
 }
 
 // -------Add Route-------------------------------------------------------------
 
+// AddRoute registers a new route.
 type AddRoute struct {
 	ProtoVer string
 	CmdType  string
@@ -117,23 +124,22 @@ type AddRoute struct {
 	Name     string
 }
 
-func NewAddRoute(name string) *AddRoute {
+func NewAddRoute(name string, protoVer int) *AddRoute {
 	return &AddRoute{
-		ProtoVer: ProtocolVerison,
+		ProtoVer: strconv.Itoa(protoVer),
 		CmdType:  CMD_ADD_ROUTE,
-		ID:       uuid.New().String(),
+		ID:       uuid.NewString(),
 		Name:     name,
 	}
 }
 
-func (c *AddRoute) Serialize() string {
-	return strings.Join([]string{c.ProtoVer, c.CmdType, c.ID, c.Name},
-		delimiter,
-	)
+func (c *AddRoute) SerializeFields() []string {
+	return []string{c.ProtoVer, c.CmdType, c.ID, c.Name}
 }
 
 // -------Add Transformer-------------------------------------------------------
 
+// AddTransformer registers a transformer on route+channel to address.
 type AddTransformer struct {
 	ProtoVer string
 	CmdType  string
@@ -143,45 +149,167 @@ type AddTransformer struct {
 	Address  string
 }
 
-func NewAddTransformer(route, channel, address string) *AddTransformer {
+func NewAddTransformer(
+	route,
+	channel,
+	address string,
+	protoVer int,
+) *AddTransformer {
 	return &AddTransformer{
-		ProtoVer: ProtocolVerison,
+		ProtoVer: strconv.Itoa(protoVer),
 		CmdType:  CMD_ADD_TRANSFORMER,
-		ID:       uuid.New().String(),
+		ID:       uuid.NewString(),
 		Route:    route,
 		Channel:  channel,
 		Address:  address,
 	}
 }
 
-func (c *AddTransformer) Serialize() string {
-	return strings.Join(
-		[]string{c.ProtoVer, c.CmdType, c.ID, c.Route, c.Channel, c.Address},
-		delimiter,
-	)
+func (c *AddTransformer) SerializeFields() []string {
+	return []string{c.ProtoVer, c.CmdType, c.ID, c.Route, c.Channel, c.Address}
 }
 
 // -------Command Processing----------------------------------------------------
 
-// Formats the address for friendly IPv6 or IPv4 based on contained characterse.
-func formatAddress(host string, port int) string {
-	if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") {
-		// Likely an IPv6 address
-		return fmt.Sprintf("[%s]:%d", host, port)
-	}
-	return fmt.Sprintf("%s:%d", host, port)
+// encodeUvarint encodes n using unsigned LEB128.
+func encodeUvarint(n uint64) []byte {
+	var buf [binary.MaxVarintLen64]byte
+	k := binary.PutUvarint(buf[:], n)
+	return buf[:k]
 }
 
-// Sends the command to the Mycelia client at the given address + port.
+// serializeMessage encodes fields as [uvarint length][bytes]...
+func serializeMessage(cmd CommandType) []byte {
+	var b bytes.Buffer
+	for _, f := range cmd.SerializeFields() {
+		if f == "" {
+			continue
+		}
+		fb := []byte(f) // Go strings are UTF-8
+		b.Write(encodeUvarint(uint64(len(fb))))
+		b.Write(fb)
+	}
+	return b.Bytes()
+}
+
+// ProcessCommand connects to address:port and sends [uvarint msgLen][payload].
 func ProcessCommand(cmd CommandType, address string, port int) error {
-	payload := cmd.Serialize()
-	fullAddr := formatAddress(address, port)
-	conn, err := net.Dial("tcp", fullAddr)
+	payload := serializeMessage(cmd)
+	frame := append(encodeUvarint(uint64(len(payload))), payload...)
+
+	conn, err := net.Dial("tcp", net.JoinHostPort(address, strconv.Itoa(port)))
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
 
-	_, err = conn.Write([]byte(payload))
+	_, err = conn.Write(frame)
 	return err
+}
+
+// --------Network Boilerplate--------------------------------------------------
+
+// GetLocalIPv4 returns the host's primary IPv4, or 127.0.0.1 on failure.
+// It mirrors the Python trick of UDP "connect" to discover the chosen interface.
+func GetLocalIPv4() string {
+	conn, err := net.DialTimeout("udp", "10.255.255.255:1", 2*time.Second)
+	if err != nil {
+		return "127.0.0.1"
+	}
+	defer conn.Close()
+	if la, ok := conn.LocalAddr().(*net.UDPAddr); ok && la.IP != nil {
+		return la.IP.String()
+	}
+	return "127.0.0.1"
+}
+
+// MyceliaListener binds a TCP port and forwards incoming framed payloads
+// to MessageProcessor. It reads [uvarint msgLen][payload] repeatedly.
+type MyceliaListener struct {
+	LocalAddr        string
+	LocalPort        int
+	MessageProcessor func([]byte)
+
+	ln     net.Listener
+	closed chan struct{}
+}
+
+func NewMyceliaListener(
+	localAddr string,
+	localPort int,
+	handler func([]byte),
+) *MyceliaListener {
+	return &MyceliaListener{
+		LocalAddr:        localAddr,
+		LocalPort:        localPort,
+		MessageProcessor: handler,
+		closed:           make(chan struct{}),
+	}
+}
+
+// Start runs accept loop (blocking). Call Stop from another goroutine to exit.
+func (m *MyceliaListener) Start() error {
+	addr := net.JoinHostPort(m.LocalAddr, strconv.Itoa(m.LocalPort))
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	m.ln = ln
+	fmt.Printf("Listening on %s\n", addr)
+
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			select {
+			case <-m.closed:
+				return nil // closed by Stop
+			default:
+				return err
+			}
+		}
+		go m.handleConn(conn)
+	}
+}
+
+// Stop closes the listener socket.
+func (m *MyceliaListener) Stop() {
+	close(m.closed)
+	if m.ln != nil {
+		_ = m.ln.Close()
+	}
+}
+
+func (m *MyceliaListener) handleConn(conn net.Conn) {
+	defer conn.Close()
+	fmt.Printf("Connected by %s\n", conn.RemoteAddr().String())
+
+	reader := bufio.NewReader(conn)
+	for {
+		msgLen, err := binary.ReadUvarint(reader)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return
+			}
+			// partial/invalid frame ends this connection
+			fmt.Printf("Bad message length: %v\n", err)
+			return
+		}
+		if msgLen == 0 {
+			continue
+		}
+
+		msg := make([]byte, msgLen)
+		if _, err := io.ReadFull(reader, msg); err != nil {
+			if errors.Is(err, io.EOF) {
+				return
+			}
+			fmt.Printf("Bad message body: %v\n", err)
+			return
+		}
+
+		// Hand off the raw payload bytes
+		if m.MessageProcessor != nil {
+			m.MessageProcessor(msg)
+		}
+	}
 }
