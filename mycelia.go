@@ -14,8 +14,6 @@ import (
 	"github.com/google/uuid"
 )
 
-const delimiter = ";;"
-
 const (
 	// The integer version number of which protocol version the remote broker
 	// should use to decode data fields.
