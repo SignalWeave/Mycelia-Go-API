@@ -1,7 +1,6 @@
 package mycelia
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/binary"
 	"errors"
@@ -15,138 +14,220 @@ import (
 )
 
 const (
-	// The integer version number of which protocol version the remote broker
-	// should use to decode data fields.
-	API_VERSION = 1
-
-	// Version 1 of the command API does not support sub-command parsing.
-	// The <object>.<action> syntax is the conform to future version feature
-	// syntax.
-	CMD_SEND_MESSAGE    = "MESSAGE.ADD"
-	CMD_ADD_TRANSFORMER = "TRANSFORMER.ADD"
-	CMD_ADD_SUBSCRIBER  = "SUBSCRIBER.ADD"
+	OBJ_MESSAGE     uint32 = 1
+	OBJ_TRANSFORMER uint32 = 2
+	OBJ_SUBSCRIBER  uint32 = 3
 )
 
-type CommandType interface {
-	SerializeFields() []string
+const (
+	_CMD_UNKNOWN uint32 = 0
+	CMD_SEND     uint32 = 1
+	CMD_ADD      uint32 = 2
+	CMD_REMOVE   uint32 = 3
+)
+
+const (
+	API_PROTOCOL_VER uint32 = 1
+)
+
+// -------Types-----------------------------------------------------------------
+
+// Base carries the common header fields.
+type Base struct {
+	ProtocolVersion uint32
+	ObjType         uint32
+	CmdType         uint32
+	UID             string
+	Route           string
 }
 
-// -------Send Message----------------------------------------------------------
-
-// SendMessage sends a payload through a route.
-type SendMessage struct {
-	ProtoVer string
-	CmdType  string
-	ID       string
-	Route    string
-	Payload  string
+// Message = OBJ_MESSAGE (default CMD_SEND).
+type Message struct {
+	Base
+	Payload []byte
 }
 
-func NewSendMessage(route, payload string, protoVer int) *SendMessage {
-	return &SendMessage{
-		ProtoVer: strconv.Itoa(protoVer),
-		CmdType:  CMD_SEND_MESSAGE,
-		ID:       uuid.NewString(),
-		Route:    route,
-		Payload:  payload,
+func NewMessage(route string, payload []byte) *Message {
+	return &Message{
+		Base: Base{
+			ProtocolVersion: API_PROTOCOL_VER,
+			ObjType:         OBJ_MESSAGE,
+			CmdType:         CMD_SEND,
+			UID:             uuid.NewString(),
+			Route:           route,
+		},
+		Payload: payload,
 	}
 }
 
-func (c *SendMessage) SerializeFields() []string {
-	return []string{c.ProtoVer, c.CmdType, c.ID, c.Route, c.Payload}
+// Transformer = OBJ_TRANSFORMER (default CMD_ADD).
+type Transformer struct {
+	Base
+	Channel string
+	Address string
 }
 
-// -------Add Subscriber--------------------------------------------------------
-
-// AddSubscriber registers a subscriber at address on route+channel.
-type AddSubscriber struct {
-	ProtoVer string
-	CmdType  string
-	ID       string
-	Route    string
-	Channel  string
-	Address  string
-}
-
-func NewAddSubscriber(
-	route,
-	channel,
-	address string,
-	protoVer int,
-) *AddSubscriber {
-	return &AddSubscriber{
-		ProtoVer: strconv.Itoa(protoVer),
-		CmdType:  CMD_ADD_SUBSCRIBER,
-		ID:       uuid.NewString(),
-		Route:    route,
-		Channel:  channel,
-		Address:  address,
+func NewTransformer(route, channel, address string) *Transformer {
+	return &Transformer{
+		Base: Base{
+			ProtocolVersion: API_PROTOCOL_VER,
+			ObjType:         OBJ_TRANSFORMER,
+			CmdType:         CMD_ADD,
+			UID:             uuid.NewString(),
+			Route:           route,
+		},
+		Channel: channel,
+		Address: address,
 	}
 }
 
-func (c *AddSubscriber) SerializeFields() []string {
-	return []string{c.ProtoVer, c.CmdType, c.ID, c.Route, c.Channel, c.Address}
+// Subscriber = OBJ_SUBSCRIBER (default CMD_ADD).
+type Subscriber struct {
+	Base
+	Channel string
+	Address string
 }
 
-// -------Add Transformer-------------------------------------------------------
-
-// AddTransformer registers a transformer on route+channel to address.
-type AddTransformer struct {
-	ProtoVer string
-	CmdType  string
-	ID       string
-	Route    string
-	Channel  string
-	Address  string
-}
-
-func NewAddTransformer(
-	route,
-	channel,
-	address string,
-	protoVer int,
-) *AddTransformer {
-	return &AddTransformer{
-		ProtoVer: strconv.Itoa(protoVer),
-		CmdType:  CMD_ADD_TRANSFORMER,
-		ID:       uuid.NewString(),
-		Route:    route,
-		Channel:  channel,
-		Address:  address,
+func NewSubscriber(route, channel, address string) *Subscriber {
+	return &Subscriber{
+		Base: Base{
+			ProtocolVersion: API_PROTOCOL_VER,
+			ObjType:         OBJ_SUBSCRIBER,
+			CmdType:         CMD_ADD,
+			UID:             uuid.NewString(),
+			Route:           route,
+		},
+		Channel: channel,
+		Address: address,
 	}
 }
 
-func (c *AddTransformer) SerializeFields() []string {
-	return []string{c.ProtoVer, c.CmdType, c.ID, c.Route, c.Channel, c.Address}
+// -------Encoding helpers (Big Endian, length-prefixed strings/bytes)----------
+
+func u32(b *bytes.Buffer, v uint32) {
+	_ = binary.Write(b, binary.BigEndian, v)
 }
 
-// -------Command Processing----------------------------------------------------
-
-// encodeUvarint encodes n using unsigned LEB128.
-func encodeUvarint(n uint64) []byte {
-	var buf [binary.MaxVarintLen64]byte
-	k := binary.PutUvarint(buf[:], n)
-	return buf[:k]
+func pstr(b *bytes.Buffer, s string) {
+	u32(b, uint32(len(s)))
+	_, _ = b.WriteString(s)
 }
 
-// serializeMessage encodes fields as [uvarint length][bytes]...
-func serializeMessage(cmd CommandType) []byte {
-	var b bytes.Buffer
-	for _, f := range cmd.SerializeFields() {
-		if f == "" {
-			continue
-		}
-		fb := []byte(f) // Go strings are UTF-8
-		b.Write(encodeUvarint(uint64(len(fb))))
-		b.Write(fb)
+func pbytes(b *bytes.Buffer, p []byte) {
+	u32(b, uint32(len(p)))
+	_, _ = b.Write(p)
+}
+
+// -------Encoder --------------------------------------------------------------
+
+// EncodeAny builds the protocol frame with the leading total length prefix.
+func EncodeAny(v interface{}) ([]byte, error) {
+	var body bytes.Buffer
+
+	switch t := v.(type) {
+	case *Message:
+		encodeMessage(t, body)
+	case *Transformer:
+		encodeTransformer(t, body)
+	case *Subscriber:
+		encodeSubscriber(t, body)
+	default:
+		return nil, fmt.Errorf("EncodeAny: unsupported type %T", v)
 	}
-	return b.Bytes()
+
+	// Prepend the total frame length
+	packet := body.Bytes()
+	var frame bytes.Buffer
+	u32(&frame, uint32(len(packet)))
+	_, _ = frame.Write(packet)
+
+	return frame.Bytes(), nil
 }
 
-// ProcessCommand connects to address:port and sends [uvarint msgLen][payload].
-func ProcessCommand(cmd CommandType, address string, port int) error {
-	payload := serializeMessage(cmd)
-	frame := append(encodeUvarint(uint64(len(payload))), payload...)
+func encodeMessage(t *Message, body bytes.Buffer) {
+	if t.Base.ProtocolVersion == 0 {
+		t.Base.ProtocolVersion = API_PROTOCOL_VER
+	}
+	if t.Base.ObjType == 0 {
+		t.Base.ObjType = OBJ_MESSAGE
+	}
+	if t.Base.CmdType == _CMD_UNKNOWN {
+		t.Base.CmdType = CMD_SEND
+	}
+	if t.Base.UID == "" {
+		t.Base.UID = uuid.NewString()
+	}
+
+	// Header
+	u32(&body, t.Base.ProtocolVersion)
+	u32(&body, t.Base.ObjType)
+	u32(&body, t.Base.CmdType)
+	pstr(&body, t.Base.UID)
+	pstr(&body, t.Base.Route)
+
+	// Body
+	pbytes(&body, t.Payload)
+}
+
+func encodeTransformer(t *Transformer, body bytes.Buffer) {
+	if t.Base.ProtocolVersion == 0 {
+		t.Base.ProtocolVersion = API_PROTOCOL_VER
+	}
+	if t.Base.ObjType == 0 {
+		t.Base.ObjType = OBJ_TRANSFORMER
+	}
+	if t.Base.CmdType == _CMD_UNKNOWN {
+		t.Base.CmdType = CMD_ADD
+	}
+	if t.Base.UID == "" {
+		t.Base.UID = uuid.NewString()
+	}
+
+	// Header
+	u32(&body, t.Base.ProtocolVersion)
+	u32(&body, t.Base.ObjType)
+	u32(&body, t.Base.CmdType)
+	pstr(&body, t.Base.UID)
+	pstr(&body, t.Base.Route)
+
+	// Conditional Header
+	pstr(&body, t.Channel)
+	pstr(&body, t.Address)
+}
+
+func encodeSubscriber(t *Subscriber, body bytes.Buffer) {
+	if t.Base.ProtocolVersion == 0 {
+		t.Base.ProtocolVersion = API_PROTOCOL_VER
+	}
+	if t.Base.ObjType == 0 {
+		t.Base.ObjType = OBJ_SUBSCRIBER
+	}
+	if t.Base.CmdType == _CMD_UNKNOWN {
+		t.Base.CmdType = CMD_ADD
+	}
+	if t.Base.UID == "" {
+		t.Base.UID = uuid.NewString()
+	}
+
+	// Header
+	u32(&body, t.Base.ProtocolVersion)
+	u32(&body, t.Base.ObjType)
+	u32(&body, t.Base.CmdType)
+	pstr(&body, t.Base.UID)
+	pstr(&body, t.Base.Route)
+
+	// Conditional Header
+	pstr(&body, t.Channel)
+	pstr(&body, t.Address)
+}
+
+// -------Network Boilerplate---------------------------------------------------
+
+func ProcessCommand(v interface{}, address string, port int) error {
+	frame, err := EncodeAny(v)
+	if err != nil {
+		return err
+	}
 
 	conn, err := net.Dial("tcp", net.JoinHostPort(address, strconv.Itoa(port)))
 	if err != nil {
@@ -154,113 +235,125 @@ func ProcessCommand(cmd CommandType, address string, port int) error {
 	}
 	defer conn.Close()
 
+	// Ensure full send.
 	_, err = conn.Write(frame)
 	return err
 }
 
-// --------Network Boilerplate--------------------------------------------------
-
-// GetLocalIPv4 returns the host's primary IPv4, or 127.0.0.1 on failure.
-// It mirrors the Python trick of UDP "connect" to discover the chosen interface.
+// GetLocalIPv4 returns the primary local IPv4, or 127.0.0.1 on failure.
 func GetLocalIPv4() string {
-	conn, err := net.DialTimeout("udp", "10.255.255.255:1", 2*time.Second)
+	// Trick: connect UDP to a non-routable address, then read the local addr.
+	conn, err := net.Dial("udp", "10.255.255.255:1")
 	if err != nil {
 		return "127.0.0.1"
 	}
 	defer conn.Close()
-	if la, ok := conn.LocalAddr().(*net.UDPAddr); ok && la.IP != nil {
-		return la.IP.String()
+	local := conn.LocalAddr()
+	udpAddr, ok := local.(*net.UDPAddr)
+	if !ok || udpAddr.IP == nil {
+		return "127.0.0.1"
 	}
-	return "127.0.0.1"
+	return udpAddr.IP.String()
 }
 
-// MyceliaListener binds a TCP port and forwards incoming framed payloads
-// to MessageProcessor. It reads [uvarint msgLen][payload] repeatedly.
 type MyceliaListener struct {
 	LocalAddr        string
 	LocalPort        int
 	MessageProcessor func([]byte)
 
-	ln     net.Listener
-	closed chan struct{}
+	stop chan struct{}
+	ln   *net.TCPListener
 }
 
+// NewMyceliaListener constructs a listener.
 func NewMyceliaListener(
+	proc func([]byte),
 	localAddr string,
 	localPort int,
-	handler func([]byte),
 ) *MyceliaListener {
+	if localAddr == "" {
+		localAddr = GetLocalIPv4()
+	}
+	if localPort == 0 {
+		localPort = 5500
+	}
 	return &MyceliaListener{
 		LocalAddr:        localAddr,
 		LocalPort:        localPort,
-		MessageProcessor: handler,
-		closed:           make(chan struct{}),
+		MessageProcessor: proc,
+		stop:             make(chan struct{}),
 	}
 }
 
-// Start runs accept loop (blocking). Call Stop from another goroutine to exit.
-func (m *MyceliaListener) Start() error {
-	addr := net.JoinHostPort(m.LocalAddr, strconv.Itoa(m.LocalPort))
-	ln, err := net.Listen("tcp", addr)
+// Start blocks, accepting connections and forwarding received chunks
+// to MessageProcessor.
+func (l *MyceliaListener) Start() error {
+	addr := fmt.Sprintf("%s:%d", l.LocalAddr, l.LocalPort)
+	rawLn, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err
 	}
-	m.ln = ln
+	tcpLn := rawLn.(*net.TCPListener)
+	l.ln = tcpLn
+
 	fmt.Printf("Listening on %s\n", addr)
 
+	buf := make([]byte, 1024)
+
 	for {
-		conn, err := ln.Accept()
+		// Make Accept interruptible via deadline so we can check stop signal.
+		_ = tcpLn.SetDeadline(time.Now().Add(1 * time.Second))
+
+		conn, err := tcpLn.Accept()
 		if err != nil {
+			// Check if deadline or closed
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				select {
+				case <-l.stop:
+					return nil
+				default:
+					continue
+				}
+			}
+			// If listener was closed, exit gracefully.
 			select {
-			case <-m.closed:
-				return nil // closed by Stop
+			case <-l.stop:
+				return nil
 			default:
+				// Unexpected error
 				return err
 			}
 		}
-		go m.handleConn(conn)
+
+		go func(c net.Conn) {
+			defer c.Close()
+			fmt.Printf("Connected by %s\n", c.RemoteAddr())
+			for {
+				n, rerr := c.Read(buf)
+				if n > 0 && l.MessageProcessor != nil {
+					l.MessageProcessor(buf[:n])
+				}
+				if rerr != nil {
+					if errors.Is(rerr, io.EOF) {
+						return
+					}
+					// Any other read error ends the connection loop
+					return
+				}
+			}
+		}(conn)
 	}
 }
 
-// Stop closes the listener socket.
-func (m *MyceliaListener) Stop() {
-	close(m.closed)
-	if m.ln != nil {
-		_ = m.ln.Close()
+// Stop signals the listener to stop and closes the socket.
+func (l *MyceliaListener) Stop() {
+	select {
+	case <-l.stop:
+		// already stopped
+	default:
+		close(l.stop)
 	}
-}
-
-func (m *MyceliaListener) handleConn(conn net.Conn) {
-	defer conn.Close()
-	fmt.Printf("Connected by %s\n", conn.RemoteAddr().String())
-
-	reader := bufio.NewReader(conn)
-	for {
-		msgLen, err := binary.ReadUvarint(reader)
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return
-			}
-			// partial/invalid frame ends this connection
-			fmt.Printf("Bad message length: %v\n", err)
-			return
-		}
-		if msgLen == 0 {
-			continue
-		}
-
-		msg := make([]byte, msgLen)
-		if _, err := io.ReadFull(reader, msg); err != nil {
-			if errors.Is(err, io.EOF) {
-				return
-			}
-			fmt.Printf("Bad message body: %v\n", err)
-			return
-		}
-
-		// Hand off the raw payload bytes
-		if m.MessageProcessor != nil {
-			m.MessageProcessor(msg)
-		}
+	if l.ln != nil {
+		_ = l.ln.Close()
 	}
 }
