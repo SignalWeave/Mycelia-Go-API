@@ -23,8 +23,6 @@ const (
 	// The <object>.<action> syntax is the conform to future version feature
 	// syntax.
 	CMD_SEND_MESSAGE    = "MESSAGE.ADD"
-	CMD_ADD_ROUTE       = "ROUTE.ADD"
-	CMD_ADD_CHANNEL     = "CHANNEL.ADD"
 	CMD_ADD_TRANSFORMER = "TRANSFORMER.ADD"
 	CMD_ADD_SUBSCRIBER  = "SUBSCRIBER.ADD"
 )
@@ -88,54 +86,6 @@ func NewAddSubscriber(
 
 func (c *AddSubscriber) SerializeFields() []string {
 	return []string{c.ProtoVer, c.CmdType, c.ID, c.Route, c.Channel, c.Address}
-}
-
-// -------Add Channel-----------------------------------------------------------
-
-// AddChannel adds a channel to a route.
-type AddChannel struct {
-	ProtoVer string
-	CmdType  string
-	ID       string
-	Route    string
-	Name     string
-}
-
-func NewAddChannel(route, name string, protoVer int) *AddChannel {
-	return &AddChannel{
-		ProtoVer: strconv.Itoa(protoVer),
-		CmdType:  CMD_ADD_CHANNEL,
-		ID:       uuid.NewString(),
-		Route:    route,
-		Name:     name,
-	}
-}
-
-func (c *AddChannel) SerializeFields() []string {
-	return []string{c.ProtoVer, c.CmdType, c.ID, c.Route, c.Name}
-}
-
-// -------Add Route-------------------------------------------------------------
-
-// AddRoute registers a new route.
-type AddRoute struct {
-	ProtoVer string
-	CmdType  string
-	ID       string
-	Name     string
-}
-
-func NewAddRoute(name string, protoVer int) *AddRoute {
-	return &AddRoute{
-		ProtoVer: strconv.Itoa(protoVer),
-		CmdType:  CMD_ADD_ROUTE,
-		ID:       uuid.NewString(),
-		Name:     name,
-	}
-}
-
-func (c *AddRoute) SerializeFields() []string {
-	return []string{c.ProtoVer, c.CmdType, c.ID, c.Name}
 }
 
 // -------Add Transformer-------------------------------------------------------
