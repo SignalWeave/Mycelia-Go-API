@@ -257,9 +257,11 @@ func GetLocalIPv4() string {
 }
 
 type MyceliaListener struct {
-	LocalAddr        string
-	LocalPort        int
-	MessageProcessor func([]byte)
+	LocalAddr string
+	LocalPort int
+	// If the processor returns (reply, true), the reply is sent back to the
+	// client, if it returns (_, false), no reply is sent.
+	MessageProcessor func([]byte) ([]byte, bool)
 
 	stop chan struct{}
 	ln   *net.TCPListener
@@ -267,7 +269,7 @@ type MyceliaListener struct {
 
 // NewMyceliaListener constructs a listener.
 func NewMyceliaListener(
-	proc func([]byte),
+	proc func([]byte) ([]byte, bool),
 	localAddr string,
 	localPort int,
 ) *MyceliaListener {
@@ -286,7 +288,7 @@ func NewMyceliaListener(
 }
 
 // Start blocks, accepting connections and forwarding received chunks
-// to MessageProcessor.
+// to MessageProcessor; if it returns (reply, true) we write the reply back.
 func (l *MyceliaListener) Start() error {
 	addr := fmt.Sprintf("%s:%d", l.LocalAddr, l.LocalPort)
 	rawLn, err := net.Listen("tcp", addr)
@@ -297,8 +299,6 @@ func (l *MyceliaListener) Start() error {
 	l.ln = tcpLn
 
 	fmt.Printf("Listening on %s\n", addr)
-
-	buf := make([]byte, 1024)
 
 	for {
 		// Make Accept interruptible via deadline so we can check stop signal.
@@ -328,10 +328,21 @@ func (l *MyceliaListener) Start() error {
 		go func(c net.Conn) {
 			defer c.Close()
 			fmt.Printf("Connected by %s\n", c.RemoteAddr())
+
+			// Allocate a buffer per-connection to avoid races across
+			// goroutines.
+			buf := make([]byte, 1024)
+
 			for {
 				n, rerr := c.Read(buf)
 				if n > 0 && l.MessageProcessor != nil {
-					l.MessageProcessor(buf[:n])
+					reply, ok := l.MessageProcessor(buf[:n])
+					if ok {
+						// Note: writing zero bytes is a no-op, which is fine.
+						if _, werr := c.Write(reply); werr != nil {
+							return
+						}
+					}
 				}
 				if rerr != nil {
 					if errors.Is(rerr, io.EOF) {
