@@ -14,29 +14,29 @@ import (
 )
 
 const (
-	OBJ_MESSAGE     uint32 = 1
-	OBJ_TRANSFORMER uint32 = 2
-	OBJ_SUBSCRIBER  uint32 = 3
+	OBJ_MESSAGE     uint8 = 1
+	OBJ_TRANSFORMER uint8 = 2
+	OBJ_SUBSCRIBER  uint8 = 3
 )
 
 const (
-	_CMD_UNKNOWN uint32 = 0
-	CMD_SEND     uint32 = 1
-	CMD_ADD      uint32 = 2
-	CMD_REMOVE   uint32 = 3
+	_CMD_UNKNOWN uint8 = 0
+	CMD_SEND     uint8 = 1
+	CMD_ADD      uint8 = 2
+	CMD_REMOVE   uint8 = 3
 )
 
 const (
-	API_PROTOCOL_VER uint32 = 1
+	API_PROTOCOL_VER uint8 = 1
 )
 
 // -------Types-----------------------------------------------------------------
 
 // Base carries the common header fields.
 type Base struct {
-	ProtocolVersion uint32
-	ObjType         uint32
-	CmdType         uint32
+	ProtocolVersion uint8
+	ObjType         uint8
+	CmdType         uint8
 	UID             string
 	Route           string
 }
@@ -104,6 +104,11 @@ func NewSubscriber(route, channel, address string) *Subscriber {
 
 // -------Encoding helpers (Big Endian, length-prefixed strings/bytes)----------
 
+func u8(b *bytes.Buffer, v uint8) {
+	// Endianness doesn't matter for 1 byte but Write() requires it.
+	_ = binary.Write(b, binary.BigEndian, v)
+}
+
 func u32(b *bytes.Buffer, v uint32) {
 	_ = binary.Write(b, binary.BigEndian, v)
 }
@@ -159,9 +164,9 @@ func encodeMessage(t *Message, body bytes.Buffer) {
 	}
 
 	// Header
-	u32(&body, t.Base.ProtocolVersion)
-	u32(&body, t.Base.ObjType)
-	u32(&body, t.Base.CmdType)
+	u8(&body, t.Base.ProtocolVersion)
+	u8(&body, t.Base.ObjType)
+	u8(&body, t.Base.CmdType)
 	pstr(&body, t.Base.UID)
 	pstr(&body, t.Base.Route)
 
@@ -184,9 +189,9 @@ func encodeTransformer(t *Transformer, body bytes.Buffer) {
 	}
 
 	// Header
-	u32(&body, t.Base.ProtocolVersion)
-	u32(&body, t.Base.ObjType)
-	u32(&body, t.Base.CmdType)
+	u8(&body, t.Base.ProtocolVersion)
+	u8(&body, t.Base.ObjType)
+	u8(&body, t.Base.CmdType)
 	pstr(&body, t.Base.UID)
 	pstr(&body, t.Base.Route)
 
@@ -210,9 +215,9 @@ func encodeSubscriber(t *Subscriber, body bytes.Buffer) {
 	}
 
 	// Header
-	u32(&body, t.Base.ProtocolVersion)
-	u32(&body, t.Base.ObjType)
-	u32(&body, t.Base.CmdType)
+	u8(&body, t.Base.ProtocolVersion)
+	u8(&body, t.Base.ObjType)
+	u8(&body, t.Base.CmdType)
 	pstr(&body, t.Base.UID)
 	pstr(&body, t.Base.Route)
 
