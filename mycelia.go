@@ -3,6 +3,7 @@ package mycelia
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -17,6 +18,7 @@ const (
 	OBJ_MESSAGE     uint8 = 1
 	OBJ_TRANSFORMER uint8 = 2
 	OBJ_SUBSCRIBER  uint8 = 3
+	OBJ_GLOBALS     uint8 = 4
 )
 
 const (
@@ -24,6 +26,7 @@ const (
 	CMD_SEND     uint8 = 1
 	CMD_ADD      uint8 = 2
 	CMD_REMOVE   uint8 = 3
+	CMD_UPDATE   uint8 = 4
 )
 
 const (
@@ -38,12 +41,16 @@ type Base struct {
 	ObjType         uint8
 	CmdType         uint8
 	UID             string
-	Route           string
+}
+
+type Routed struct {
+	Route string
 }
 
 // Message = OBJ_MESSAGE (default CMD_SEND).
 type Message struct {
 	Base
+	Routed
 	Payload []byte
 }
 
@@ -53,8 +60,10 @@ func NewMessage(route string, payload []byte) *Message {
 			ProtocolVersion: API_PROTOCOL_VER,
 			ObjType:         OBJ_MESSAGE,
 			CmdType:         CMD_SEND,
-			UID:             uuid.NewString(),
-			Route:           route,
+			UID:             "",
+		},
+		Routed: Routed{
+			Route: route,
 		},
 		Payload: payload,
 	}
@@ -63,6 +72,7 @@ func NewMessage(route string, payload []byte) *Message {
 // Transformer = OBJ_TRANSFORMER (default CMD_ADD).
 type Transformer struct {
 	Base
+	Routed
 	Channel string
 	Address string
 }
@@ -73,8 +83,10 @@ func NewTransformer(route, channel, address string) *Transformer {
 			ProtocolVersion: API_PROTOCOL_VER,
 			ObjType:         OBJ_TRANSFORMER,
 			CmdType:         CMD_ADD,
-			UID:             uuid.NewString(),
-			Route:           route,
+			UID:             "",
+		},
+		Routed: Routed{
+			Route: route,
 		},
 		Channel: channel,
 		Address: address,
@@ -84,6 +96,7 @@ func NewTransformer(route, channel, address string) *Transformer {
 // Subscriber = OBJ_SUBSCRIBER (default CMD_ADD).
 type Subscriber struct {
 	Base
+	Routed
 	Channel string
 	Address string
 }
@@ -94,11 +107,39 @@ func NewSubscriber(route, channel, address string) *Subscriber {
 			ProtocolVersion: API_PROTOCOL_VER,
 			ObjType:         OBJ_SUBSCRIBER,
 			CmdType:         CMD_ADD,
-			UID:             uuid.NewString(),
-			Route:           route,
+			UID:             "",
+		},
+		Routed: Routed{
+			Route: route,
 		},
 		Channel: channel,
 		Address: address,
+	}
+}
+
+// Globals = OBJ_GLOBALS (default CMD_UPDATE)
+type Globals struct {
+	Base
+	Address          string
+	Port             int
+	Verbosity        int8
+	PrintTree        *bool
+	TransformTimeout string
+}
+
+func NewGlobals() *Globals {
+	return &Globals{
+		Base: Base{
+			ProtocolVersion: API_PROTOCOL_VER,
+			ObjType:         OBJ_GLOBALS,
+			CmdType:         CMD_UPDATE,
+			UID:             "",
+		},
+		Address:          "",
+		Port:             -1,
+		Verbosity:        -1,
+		PrintTree:        nil,
+		TransformTimeout: "",
 	}
 }
 
@@ -126,7 +167,7 @@ func pbytes(b *bytes.Buffer, p []byte) {
 // -------Encoder --------------------------------------------------------------
 
 // EncodeAny builds the protocol frame with the leading total length prefix.
-func EncodeAny(v interface{}) ([]byte, error) {
+func EncodeAny(v any) ([]byte, error) {
 	var body bytes.Buffer
 
 	switch t := v.(type) {
@@ -136,6 +177,11 @@ func EncodeAny(v interface{}) ([]byte, error) {
 		encodeTransformer(t, body)
 	case *Subscriber:
 		encodeSubscriber(t, body)
+	case *Globals:
+		err := encodeGlobals(t, body)
+		if err != nil {
+			return nil, err
+		}
 	default:
 		return nil, fmt.Errorf("EncodeAny: unsupported type %T", v)
 	}
@@ -168,7 +214,7 @@ func encodeMessage(t *Message, body bytes.Buffer) {
 	u8(&body, t.Base.ObjType)
 	u8(&body, t.Base.CmdType)
 	pstr(&body, t.Base.UID)
-	pstr(&body, t.Base.Route)
+	pstr(&body, t.Routed.Route)
 
 	// Body
 	pbytes(&body, t.Payload)
@@ -193,7 +239,7 @@ func encodeTransformer(t *Transformer, body bytes.Buffer) {
 	u8(&body, t.Base.ObjType)
 	u8(&body, t.Base.CmdType)
 	pstr(&body, t.Base.UID)
-	pstr(&body, t.Base.Route)
+	pstr(&body, t.Routed.Route)
 
 	// Conditional Header
 	pstr(&body, t.Channel)
@@ -219,11 +265,53 @@ func encodeSubscriber(t *Subscriber, body bytes.Buffer) {
 	u8(&body, t.Base.ObjType)
 	u8(&body, t.Base.CmdType)
 	pstr(&body, t.Base.UID)
-	pstr(&body, t.Base.Route)
+	pstr(&body, t.Routed.Route)
 
 	// Conditional Header
 	pstr(&body, t.Channel)
 	pstr(&body, t.Address)
+}
+
+func encodeGlobals(t *Globals, body bytes.Buffer) error {
+	if t.Base.ProtocolVersion == 0 {
+		t.Base.ProtocolVersion = API_PROTOCOL_VER
+	}
+	if t.Base.ObjType == 0 {
+		t.Base.ObjType = OBJ_SUBSCRIBER
+	}
+	if t.Base.CmdType == _CMD_UNKNOWN {
+		t.Base.CmdType = CMD_UPDATE
+	}
+	if t.Base.UID == "" {
+		t.Base.UID = uuid.NewString()
+	}
+
+	values := map[string]any{}
+
+	if t.Address != "" {
+		values["address"] = t.Address
+	}
+	if t.Port > 0 && t.Port < 65536 {
+		values["port"] = uint8(t.Port)
+	}
+	if t.Verbosity > -1 && t.Verbosity < 4 {
+		values["verbosity"] = uint8(t.Verbosity)
+	}
+	if t.PrintTree != nil {
+		values["print_tree"] = *t.PrintTree
+	}
+	if t.TransformTimeout != "" {
+		values["transform_timeout"] = t.TransformTimeout
+	}
+
+	b, err := json.Marshal(values)
+	if err != nil {
+		return err
+	}
+	valueString := string(b)
+
+	pstr(&body, valueString)
+	return nil
 }
 
 // -------Network Boilerplate---------------------------------------------------
