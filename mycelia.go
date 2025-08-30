@@ -1,4 +1,3 @@
-// mycelia_client.go
 package mycelia
 
 import (
@@ -8,15 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 	"strconv"
 	"time"
 
 	"github.com/google/uuid"
 )
-
-// -----------------------------------------------------------------------------
-// Constants (object and command types) — mirrors the Python code.
-// -----------------------------------------------------------------------------
 
 const (
 	OBJ_MESSAGE     uint8 = 1
@@ -39,9 +35,12 @@ const (
 	maxU16Len        uint32 = 65535
 )
 
-// -----------------------------------------------------------------------------
-// Public message types (parallel to Python classes).
-// -----------------------------------------------------------------------------
+// -------Public message types--------------------------------------------------
+
+type Command interface {
+	CmdValid() bool
+	EffectiveCmd() uint8
+}
 
 // Message sends a payload over a route.
 type Message struct {
@@ -52,8 +51,8 @@ type Message struct {
 	CmdType uint8
 }
 
-func (m Message) cmdValid() bool { return m.effectiveCmd() == CMD_SEND }
-func (m Message) effectiveCmd() uint8 {
+func (m Message) CmdValid() bool { return m.EffectiveCmd() == CMD_SEND }
+func (m Message) EffectiveCmd() uint8 {
 	if m.CmdType != _CMD_UNKNOWN {
 		return m.CmdType
 	}
@@ -70,11 +69,11 @@ type Transformer struct {
 	CmdType uint8
 }
 
-func (t Transformer) cmdValid() bool {
-	c := t.effectiveCmd()
+func (t Transformer) CmdValid() bool {
+	c := t.EffectiveCmd()
 	return c == CMD_ADD || c == CMD_REMOVE
 }
-func (t Transformer) effectiveCmd() uint8 {
+func (t Transformer) EffectiveCmd() uint8 {
 	if t.CmdType != _CMD_UNKNOWN {
 		return t.CmdType
 	}
@@ -91,19 +90,19 @@ type Subscriber struct {
 	CmdType uint8
 }
 
-func (s Subscriber) cmdValid() bool {
-	c := s.effectiveCmd()
+func (s Subscriber) CmdValid() bool {
+	c := s.EffectiveCmd()
 	return c == CMD_ADD || c == CMD_REMOVE
 }
-func (s Subscriber) effectiveCmd() uint8 {
+func (s Subscriber) EffectiveCmd() uint8 {
 	if s.CmdType != _CMD_UNKNOWN {
 		return s.CmdType
 	}
 	return CMD_ADD
 }
 
-// GlobalValues matches the Python shape. Only set fields you want to change.
 type GlobalValues struct {
+	SecurityToken    string
 	Address          string // '' = ignore
 	Port             int    // 0..65535 valid; others ignored
 	Verbosity        int    // 0..3 valid; others ignored
@@ -120,17 +119,15 @@ type Globals struct {
 	CmdType uint8
 }
 
-func (g Globals) cmdValid() bool { return g.effectiveCmd() == CMD_UPDATE }
-func (g Globals) effectiveCmd() uint8 {
+func (g Globals) CmdValid() bool { return g.EffectiveCmd() == CMD_UPDATE }
+func (g Globals) EffectiveCmd() uint8 {
 	if g.CmdType != _CMD_UNKNOWN {
 		return g.CmdType
 	}
 	return CMD_UPDATE
 }
 
-// -----------------------------------------------------------------------------
-// Encoding helpers (big-endian).
-// -----------------------------------------------------------------------------
+// -------Encoding helpers (big-endian)-----------------------------------------
 
 func putU8(buf *bytes.Buffer, n uint8) {
 	_ = buf.WriteByte(n)
@@ -177,137 +174,197 @@ func pbytes16(buf *bytes.Buffer, b []byte) error {
 	return nil
 }
 
-// -----------------------------------------------------------------------------
-// Frame builder (faithful to Python _encode_mycelia_obj).
-// -----------------------------------------------------------------------------
+// -------Frame builder---------------------------------------------------------
 
-// Encode builds the wire frame for any supported object.
-// The frame layout is:
-//
-//	[u32 total_len] [u8 version][u8 obj][u8 cmd]
-//	[u8 len uid][uid]
-//	[u16 len sender][sender]
-//	[u8 len arg1][u8 len arg2][u8 len arg3][u8 len arg4]
-//	[u16 len payload][payload]
-func Encode(obj any) ([]byte, error) {
-	var (
-		objType      uint8
-		cmdType      uint8
-		sender       string
-		arg1, arg2   string
-		arg3, arg4   string
-		payloadBytes []byte
-	)
+type frame struct {
+	objType      uint8
+	cmdType      uint8
+	sender       string
+	arg1, arg2   string
+	arg3, arg4   string
+	payloadBytes []byte
+}
 
-	switch v := obj.(type) {
-	case Message:
-		objType = OBJ_MESSAGE
-		cmdType = v.effectiveCmd()
-		if !v.cmdValid() {
-			return nil, errors.New("message: invalid cmd_type")
-		}
-		sender = v.SenderAddress
-		arg1 = v.Route
-		payloadBytes = append([]byte(nil), v.Payload...)
-
-	case Transformer:
-		objType = OBJ_TRANSFORMER
-		cmdType = v.effectiveCmd()
-		if !v.cmdValid() {
-			return nil, errors.New("transformer: invalid cmd_type")
-		}
-		sender = v.SenderAddress
-		arg1, arg2, arg3 = v.Route, v.Channel, v.Address
-		// No payload for add/remove; will encode as zero-length.
-
-	case Subscriber:
-		objType = OBJ_SUBSCRIBER
-		cmdType = v.effectiveCmd()
-		if !v.cmdValid() {
-			return nil, errors.New("subscriber: invalid cmd_type")
-		}
-		sender = v.SenderAddress
-		arg1, arg2, arg3 = v.Route, v.Channel, v.Address
-
-	case Globals:
-		objType = OBJ_GLOBALS
-		cmdType = v.effectiveCmd()
-		if !v.cmdValid() {
-			return nil, errors.New("globals: invalid cmd_type")
-		}
-		sender = v.SenderAddress
-		// Build JSON map only for populated fields (like Python).
-		data := make(map[string]any)
-		if v.Values.Address != "" {
-			data["address"] = v.Values.Address
-		}
-		if v.Values.Port > 0 && v.Values.Port < 65536 {
-			data["port"] = v.Values.Port
-		}
-		if v.Values.Verbosity >= 0 && v.Values.Verbosity < 4 {
-			data["verbosity"] = v.Values.Verbosity
-		}
-		if v.Values.PrintTree != nil {
-			data["print_tree"] = *v.Values.PrintTree
-		}
-		if v.Values.TransformTimeout != "" {
-			data["transform_timeout"] = v.Values.TransformTimeout
-		}
-		if v.Values.Consolidate != nil {
-			data["consolidate"] = *v.Values.Consolidate
-		}
-		if len(data) == 0 {
-			return nil, errors.New("globals: no valid fields to encode")
-		}
-		j, err := json.Marshal(data)
-		if err != nil {
-			return nil, fmt.Errorf("globals: marshal: %w", err)
-		}
-		payloadBytes = j
-
-	default:
-		return nil, fmt.Errorf("unsupported object type %T", obj)
+func encodeMessage(msg Message) (*frame, error) {
+	f := &frame{}
+	f.objType = OBJ_MESSAGE
+	f.cmdType = msg.EffectiveCmd()
+	if !msg.CmdValid() {
+		return nil, errors.New("message: invalid cmd_type")
 	}
 
-	if sender == "" {
+	if f.sender == "" {
 		return nil, errors.New("sender address is required")
 	}
-	// Required args for message/subscriber/transformer.
-	needsArgs := objType == OBJ_MESSAGE || objType == OBJ_SUBSCRIBER || objType == OBJ_TRANSFORMER
-	if needsArgs && arg1 == "" {
-		return nil, fmt.Errorf("object %d requires arg1", objType)
+	f.sender = msg.SenderAddress
+
+	f.arg1 = msg.Route
+	f.arg2 = ""
+	f.arg3 = ""
+	f.arg4 = ""
+
+	f.payloadBytes = append([]byte(nil), msg.Payload...)
+
+	return f, nil
+}
+
+func encodeTransformer(tfr Transformer) (*frame, error) {
+	f := &frame{}
+	f.objType = OBJ_TRANSFORMER
+	f.cmdType = tfr.EffectiveCmd()
+	if !tfr.CmdValid() {
+		return nil, errors.New("transformer: invalid cmd_type")
 	}
 
-	// Build the inner packet (without the u32 length prefix).
+	if f.sender == "" {
+		return nil, errors.New("sender address is required")
+	}
+	f.sender = tfr.SenderAddress
+
+	f.arg1, f.arg2, f.arg3, f.arg4 = tfr.Route, tfr.Channel, tfr.Address, ""
+
+	return f, nil
+}
+
+func encodeSubscriber(sub Subscriber) (*frame, error) {
+	f := &frame{}
+	f.objType = OBJ_SUBSCRIBER
+	f.cmdType = sub.EffectiveCmd()
+	if !sub.CmdValid() {
+		return nil, errors.New("subscriber: invalid cmd_type")
+	}
+
+	if f.sender == "" {
+		return nil, errors.New("sender address is required")
+	}
+	f.sender = sub.SenderAddress
+
+	f.arg1, f.arg2, f.arg3, f.arg4 = sub.Route, sub.Channel, sub.Address, ""
+
+	return f, nil
+}
+
+func encodeGlobals(glb Globals) (*frame, error) {
+	f := &frame{}
+	f.objType = OBJ_GLOBALS
+	f.cmdType = glb.EffectiveCmd()
+	if !glb.CmdValid() {
+		return nil, errors.New("globals: invalid cmd_type")
+	}
+
+	if f.sender == "" {
+		return nil, errors.New("sender address is required")
+	}
+	f.sender = glb.SenderAddress
+
+	f.arg1, f.arg2, f.arg3, f.arg4 = "", "", "", ""
+
+	data := make(map[string]any)
+	if glb.Values.Address != "" {
+		data["address"] = glb.Values.Address
+	}
+	if glb.Values.Port > 0 && glb.Values.Port < 65536 {
+		data["port"] = glb.Values.Port
+	}
+	if glb.Values.Verbosity >= 0 && glb.Values.Verbosity < 4 {
+		data["verbosity"] = glb.Values.Verbosity
+	}
+	if glb.Values.PrintTree != nil {
+		data["print_tree"] = *glb.Values.PrintTree
+	}
+	if glb.Values.TransformTimeout != "" {
+		data["transform_timeout"] = glb.Values.TransformTimeout
+	}
+	if glb.Values.Consolidate != nil {
+		data["consolidate"] = *glb.Values.Consolidate
+	}
+	if glb.Values.SecurityToken != "" {
+		return nil, errors.New("globals: security token required")
+	}
+	if len(data) == 0 {
+		return nil, errors.New("globals: no valid fields to encode")
+	}
+	j, err := json.Marshal(data)
+	if err != nil {
+		return nil, fmt.Errorf("globals: marshal: %w", err)
+	}
+	f.payloadBytes = j
+
+	return f, nil
+}
+
+func encode(cmd Command) ([]byte, error) {
+	var f *frame
+	var err error
+
+	switch v := cmd.(type) {
+	case Message:
+		f, err = encodeMessage(v)
+		if err != nil {
+			return nil, err
+		}
+	case Transformer:
+		f, err = encodeTransformer(v)
+		if err != nil {
+			return nil, err
+		}
+	case Subscriber:
+		f, err = encodeSubscriber(v)
+		if err != nil {
+			return nil, err
+		}
+	case Globals:
+		f, err = encodeGlobals(v)
+		if err != nil {
+			return nil, err
+		}
+	default:
+		return nil, fmt.Errorf("unsupported object type %T", cmd)
+	}
+
+	b, err := encodeFrame(f)
+	if err != nil {
+		return nil, err
+	}
+
+	return b, nil
+}
+
+func encodeFrame(f *frame) ([]byte, error) {
 	body := bytes.NewBuffer(nil)
 
-	// Fixed header
+	// -----Fixed header-----
 	putU8(body, API_PROTOCOL_VER)
-	putU8(body, objType)
-	putU8(body, cmdType)
+	putU8(body, f.objType)
+	putU8(body, f.cmdType)
 
-	// Tracking sub-header
-	_ = pstr8(body, uuid.NewString()) // u8-len UID
-	if err := pstr16(body, sender); err != nil {
-		return nil, err
-	}
-
-	// Args (four u8-len strings)
-	if err := pstr8(body, arg1); err != nil {
-		return nil, err
-	}
-	if err := pstr8(body, arg2); err != nil {
-		return nil, err
-	}
-	if err := pstr8(body, arg3); err != nil {
-		return nil, err
-	}
-	if err := pstr8(body, arg4); err != nil {
+	// -----Tracking sub-header-----
+	_ = pstr8(body, uuid.NewString())
+	if err := pstr16(body, f.sender); err != nil {
 		return nil, err
 	}
 
-	// Payload (u16-len bytes)
-	if err := pbytes16(body, payloadBytes); err != nil {
+	// -----Arguments-----
+	needsArgs := []uint8{OBJ_MESSAGE, OBJ_SUBSCRIBER, OBJ_TRANSFORMER}
+	if slices.Contains(needsArgs, f.objType) && f.arg1 == "" {
+		return nil, errors.New("Message has incomplete args")
+	}
+
+	if err := pstr8(body, f.arg1); err != nil {
+		return nil, err
+	}
+	if err := pstr8(body, f.arg2); err != nil {
+		return nil, err
+	}
+	if err := pstr8(body, f.arg3); err != nil {
+		return nil, err
+	}
+	if err := pstr8(body, f.arg4); err != nil {
+		return nil, err
+	}
+
+	// -----Payload-----
+	if err := pbytes16(body, f.payloadBytes); err != nil {
 		return nil, err
 	}
 
@@ -319,8 +376,8 @@ func Encode(obj any) ([]byte, error) {
 }
 
 // Send connects to address:port and transmits the encoded frame.
-func Send(obj any, address string, port int) error {
-	frame, err := Encode(obj)
+func Send(cmd Command, address string, port int) error {
+	frame, err := encode(cmd)
 	if err != nil {
 		return err
 	}
@@ -333,9 +390,7 @@ func Send(obj any, address string, port int) error {
 	return err
 }
 
-// -----------------------------------------------------------------------------
-// Listener (blocking start/stop, like MyceliaListener in Python).
-// -----------------------------------------------------------------------------
+// -------Networking Boilerplate------------------------------------------------
 
 // Processor returns an optional response. If nil, no response is sent.
 type Processor func(payload []byte) []byte
