@@ -109,6 +109,7 @@ type GlobalValues struct {
 	Verbosity        int    // 0..3 valid; others ignored
 	PrintTree        *bool  // nil = ignore
 	TransformTimeout string // '' = ignore (e.g. "500ms")
+	Consolidate      *bool  // nil = ignore
 }
 
 // Globals updates broker globals.
@@ -251,6 +252,9 @@ func Encode(obj any) ([]byte, error) {
 		}
 		if v.Values.TransformTimeout != "" {
 			data["transform_timeout"] = v.Values.TransformTimeout
+		}
+		if v.Values.Consolidate != nil {
+			data["consolidate"] = *v.Values.Consolidate
 		}
 		if len(data) == 0 {
 			return nil, errors.New("globals: no valid fields to encode")
