@@ -1,3 +1,4 @@
+// mycelia_client.go
 package mycelia
 
 import (
@@ -6,13 +7,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"strconv"
 	"time"
 
 	"github.com/google/uuid"
 )
+
+// -----------------------------------------------------------------------------
+// Constants (object and command types) — mirrors the Python code.
+// -----------------------------------------------------------------------------
 
 const (
 	OBJ_MESSAGE     uint8 = 1
@@ -30,434 +34,402 @@ const (
 )
 
 const (
-	API_PROTOCOL_VER uint8 = 1
+	API_PROTOCOL_VER uint8  = 1
+	encodingName            = "utf-8"
+	maxU16Len        uint32 = 65535
 )
 
-// -------Types-----------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// Public message types (parallel to Python classes).
+// -----------------------------------------------------------------------------
 
-// Base carries the common header fields.
-type Base struct {
-	ProtocolVersion uint8
-	ObjType         uint8
-	CmdType         uint8
-	UID             string
-}
-
-type Routed struct {
-	Route string
-}
-
-// Message = OBJ_MESSAGE (default CMD_SEND).
+// Message sends a payload over a route.
 type Message struct {
-	Base
-	Routed
-	Payload []byte
+	SenderAddress string
+	Route         string
+	Payload       []byte
+	// Optional: override, defaults to CMD_SEND if zero.
+	CmdType uint8
 }
 
-func NewMessage(route string, payload []byte) *Message {
-	return &Message{
-		Base: Base{
-			ProtocolVersion: API_PROTOCOL_VER,
-			ObjType:         OBJ_MESSAGE,
-			CmdType:         CMD_SEND,
-			UID:             "",
-		},
-		Routed: Routed{
-			Route: route,
-		},
-		Payload: payload,
+func (m Message) cmdValid() bool { return m.effectiveCmd() == CMD_SEND }
+func (m Message) effectiveCmd() uint8 {
+	if m.CmdType != _CMD_UNKNOWN {
+		return m.CmdType
 	}
+	return CMD_SEND
 }
 
-// Transformer = OBJ_TRANSFORMER (default CMD_ADD).
+// Transformer registers/unregisters a transformer at a channel.
 type Transformer struct {
-	Base
-	Routed
-	Channel string
-	Address string
+	SenderAddress string
+	Route         string
+	Channel       string
+	Address       string
+	// Optional: override, defaults to CMD_ADD if zero.
+	CmdType uint8
 }
 
-func NewTransformer(route, channel, address string) *Transformer {
-	return &Transformer{
-		Base: Base{
-			ProtocolVersion: API_PROTOCOL_VER,
-			ObjType:         OBJ_TRANSFORMER,
-			CmdType:         CMD_ADD,
-			UID:             "",
-		},
-		Routed: Routed{
-			Route: route,
-		},
-		Channel: channel,
-		Address: address,
+func (t Transformer) cmdValid() bool {
+	c := t.effectiveCmd()
+	return c == CMD_ADD || c == CMD_REMOVE
+}
+func (t Transformer) effectiveCmd() uint8 {
+	if t.CmdType != _CMD_UNKNOWN {
+		return t.CmdType
 	}
+	return CMD_ADD
 }
 
-// Subscriber = OBJ_SUBSCRIBER (default CMD_ADD).
+// Subscriber registers/unregisters a subscriber at a channel.
 type Subscriber struct {
-	Base
-	Routed
-	Channel string
-	Address string
+	SenderAddress string
+	Route         string
+	Channel       string
+	Address       string
+	// Optional: override, defaults to CMD_ADD if zero.
+	CmdType uint8
 }
 
-func NewSubscriber(route, channel, address string) *Subscriber {
-	return &Subscriber{
-		Base: Base{
-			ProtocolVersion: API_PROTOCOL_VER,
-			ObjType:         OBJ_SUBSCRIBER,
-			CmdType:         CMD_ADD,
-			UID:             "",
-		},
-		Routed: Routed{
-			Route: route,
-		},
-		Channel: channel,
-		Address: address,
+func (s Subscriber) cmdValid() bool {
+	c := s.effectiveCmd()
+	return c == CMD_ADD || c == CMD_REMOVE
+}
+func (s Subscriber) effectiveCmd() uint8 {
+	if s.CmdType != _CMD_UNKNOWN {
+		return s.CmdType
 	}
+	return CMD_ADD
 }
 
-// Globals = OBJ_GLOBALS (default CMD_UPDATE)
+// GlobalValues matches the Python shape. Only set fields you want to change.
+type GlobalValues struct {
+	Address          string // '' = ignore
+	Port             int    // 0..65535 valid; others ignored
+	Verbosity        int    // 0..3 valid; others ignored
+	PrintTree        *bool  // nil = ignore
+	TransformTimeout string // '' = ignore (e.g. "500ms")
+}
+
+// Globals updates broker globals.
 type Globals struct {
-	Base
-	Address          string
-	Port             int
-	Verbosity        int8
-	PrintTree        *bool
-	TransformTimeout string
+	SenderAddress string
+	Values        GlobalValues
+	// Optional: override, defaults to CMD_UPDATE if zero.
+	CmdType uint8
 }
 
-func NewGlobals() *Globals {
-	return &Globals{
-		Base: Base{
-			ProtocolVersion: API_PROTOCOL_VER,
-			ObjType:         OBJ_GLOBALS,
-			CmdType:         CMD_UPDATE,
-			UID:             "",
-		},
-		Address:          "",
-		Port:             -1,
-		Verbosity:        -1,
-		PrintTree:        nil,
-		TransformTimeout: "",
+func (g Globals) cmdValid() bool { return g.effectiveCmd() == CMD_UPDATE }
+func (g Globals) effectiveCmd() uint8 {
+	if g.CmdType != _CMD_UNKNOWN {
+		return g.CmdType
 	}
+	return CMD_UPDATE
 }
 
-// -------Encoding helpers (Big Endian, length-prefixed strings/bytes)----------
+// -----------------------------------------------------------------------------
+// Encoding helpers (big-endian).
+// -----------------------------------------------------------------------------
 
-func u8(b *bytes.Buffer, v uint8) {
-	// Endianness doesn't matter for 1 byte but Write() requires it.
-	_ = binary.Write(b, binary.BigEndian, v)
+func putU8(buf *bytes.Buffer, n uint8) {
+	_ = buf.WriteByte(n)
 }
 
-func u32(b *bytes.Buffer, v uint32) {
-	_ = binary.Write(b, binary.BigEndian, v)
+func putU16(buf *bytes.Buffer, n uint16) {
+	var tmp [2]byte
+	binary.BigEndian.PutUint16(tmp[:], n)
+	buf.Write(tmp[:])
 }
 
-func pstr(b *bytes.Buffer, s string) {
-	u32(b, uint32(len(s)))
-	_, _ = b.WriteString(s)
+func putU32(buf *bytes.Buffer, n uint32) {
+	var tmp [4]byte
+	binary.BigEndian.PutUint32(tmp[:], n)
+	buf.Write(tmp[:])
 }
 
-func pbytes(b *bytes.Buffer, p []byte) {
-	u32(b, uint32(len(p)))
-	_, _ = b.Write(p)
-}
-
-// -------Encoder --------------------------------------------------------------
-
-// EncodeAny builds the protocol frame with the leading total length prefix.
-func EncodeAny(v any) ([]byte, error) {
-	var body bytes.Buffer
-
-	switch t := v.(type) {
-	case *Message:
-		encodeMessage(t, body)
-	case *Transformer:
-		encodeTransformer(t, body)
-	case *Subscriber:
-		encodeSubscriber(t, body)
-	case *Globals:
-		err := encodeGlobals(t, body)
-		if err != nil {
-			return nil, err
-		}
-	default:
-		return nil, fmt.Errorf("EncodeAny: unsupported type %T", v)
+func pstr8(buf *bytes.Buffer, s string) error {
+	b := []byte(s)
+	if len(b) > 255 {
+		return fmt.Errorf("string too long for u8 prefix: %d", len(b))
 	}
-
-	// Prepend the total frame length
-	packet := body.Bytes()
-	var frame bytes.Buffer
-	u32(&frame, uint32(len(packet)))
-	_, _ = frame.Write(packet)
-
-	return frame.Bytes(), nil
-}
-
-func encodeMessage(t *Message, body bytes.Buffer) {
-	if t.Base.ProtocolVersion == 0 {
-		t.Base.ProtocolVersion = API_PROTOCOL_VER
-	}
-	if t.Base.ObjType == 0 {
-		t.Base.ObjType = OBJ_MESSAGE
-	}
-	if t.Base.CmdType == _CMD_UNKNOWN {
-		t.Base.CmdType = CMD_SEND
-	}
-	if t.Base.UID == "" {
-		t.Base.UID = uuid.NewString()
-	}
-
-	// Header
-	u8(&body, t.Base.ProtocolVersion)
-	u8(&body, t.Base.ObjType)
-	u8(&body, t.Base.CmdType)
-	pstr(&body, t.Base.UID)
-	pstr(&body, t.Routed.Route)
-
-	// Body
-	pbytes(&body, t.Payload)
-}
-
-func encodeTransformer(t *Transformer, body bytes.Buffer) {
-	if t.Base.ProtocolVersion == 0 {
-		t.Base.ProtocolVersion = API_PROTOCOL_VER
-	}
-	if t.Base.ObjType == 0 {
-		t.Base.ObjType = OBJ_TRANSFORMER
-	}
-	if t.Base.CmdType == _CMD_UNKNOWN {
-		t.Base.CmdType = CMD_ADD
-	}
-	if t.Base.UID == "" {
-		t.Base.UID = uuid.NewString()
-	}
-
-	// Header
-	u8(&body, t.Base.ProtocolVersion)
-	u8(&body, t.Base.ObjType)
-	u8(&body, t.Base.CmdType)
-	pstr(&body, t.Base.UID)
-	pstr(&body, t.Routed.Route)
-
-	// Conditional Header
-	pstr(&body, t.Channel)
-	pstr(&body, t.Address)
-}
-
-func encodeSubscriber(t *Subscriber, body bytes.Buffer) {
-	if t.Base.ProtocolVersion == 0 {
-		t.Base.ProtocolVersion = API_PROTOCOL_VER
-	}
-	if t.Base.ObjType == 0 {
-		t.Base.ObjType = OBJ_SUBSCRIBER
-	}
-	if t.Base.CmdType == _CMD_UNKNOWN {
-		t.Base.CmdType = CMD_ADD
-	}
-	if t.Base.UID == "" {
-		t.Base.UID = uuid.NewString()
-	}
-
-	// Header
-	u8(&body, t.Base.ProtocolVersion)
-	u8(&body, t.Base.ObjType)
-	u8(&body, t.Base.CmdType)
-	pstr(&body, t.Base.UID)
-	pstr(&body, t.Routed.Route)
-
-	// Conditional Header
-	pstr(&body, t.Channel)
-	pstr(&body, t.Address)
-}
-
-func encodeGlobals(t *Globals, body bytes.Buffer) error {
-	if t.Base.ProtocolVersion == 0 {
-		t.Base.ProtocolVersion = API_PROTOCOL_VER
-	}
-	if t.Base.ObjType == 0 {
-		t.Base.ObjType = OBJ_SUBSCRIBER
-	}
-	if t.Base.CmdType == _CMD_UNKNOWN {
-		t.Base.CmdType = CMD_UPDATE
-	}
-	if t.Base.UID == "" {
-		t.Base.UID = uuid.NewString()
-	}
-
-	values := map[string]any{}
-
-	if t.Address != "" {
-		values["address"] = t.Address
-	}
-	if t.Port > 0 && t.Port < 65536 {
-		values["port"] = uint8(t.Port)
-	}
-	if t.Verbosity > -1 && t.Verbosity < 4 {
-		values["verbosity"] = uint8(t.Verbosity)
-	}
-	if t.PrintTree != nil {
-		values["print_tree"] = *t.PrintTree
-	}
-	if t.TransformTimeout != "" {
-		values["transform_timeout"] = t.TransformTimeout
-	}
-
-	b, err := json.Marshal(values)
-	if err != nil {
-		return err
-	}
-	valueString := string(b)
-
-	pstr(&body, valueString)
+	putU8(buf, uint8(len(b)))
+	buf.Write(b)
 	return nil
 }
 
-// -------Network Boilerplate---------------------------------------------------
+func pstr16(buf *bytes.Buffer, s string) error {
+	b := []byte(s)
+	if len(b) > int(maxU16Len) {
+		return fmt.Errorf("string too long for u16 prefix: %d", len(b))
+	}
+	putU16(buf, uint16(len(b)))
+	buf.Write(b)
+	return nil
+}
 
-func ProcessCommand(v interface{}, address string, port int) error {
-	frame, err := EncodeAny(v)
+func pbytes16(buf *bytes.Buffer, b []byte) error {
+	if len(b) > int(maxU16Len) {
+		return fmt.Errorf("bytes too long for u16 prefix: %d", len(b))
+	}
+	putU16(buf, uint16(len(b)))
+	buf.Write(b)
+	return nil
+}
+
+// -----------------------------------------------------------------------------
+// Frame builder (faithful to Python _encode_mycelia_obj).
+// -----------------------------------------------------------------------------
+
+// Encode builds the wire frame for any supported object.
+// The frame layout is:
+//
+//	[u32 total_len] [u8 version][u8 obj][u8 cmd]
+//	[u8 len uid][uid]
+//	[u16 len sender][sender]
+//	[u8 len arg1][u8 len arg2][u8 len arg3][u8 len arg4]
+//	[u16 len payload][payload]
+func Encode(obj any) ([]byte, error) {
+	var (
+		objType      uint8
+		cmdType      uint8
+		sender       string
+		arg1, arg2   string
+		arg3, arg4   string
+		payloadBytes []byte
+	)
+
+	switch v := obj.(type) {
+	case Message:
+		objType = OBJ_MESSAGE
+		cmdType = v.effectiveCmd()
+		if !v.cmdValid() {
+			return nil, errors.New("message: invalid cmd_type")
+		}
+		sender = v.SenderAddress
+		arg1 = v.Route
+		payloadBytes = append([]byte(nil), v.Payload...)
+
+	case Transformer:
+		objType = OBJ_TRANSFORMER
+		cmdType = v.effectiveCmd()
+		if !v.cmdValid() {
+			return nil, errors.New("transformer: invalid cmd_type")
+		}
+		sender = v.SenderAddress
+		arg1, arg2, arg3 = v.Route, v.Channel, v.Address
+		// No payload for add/remove; will encode as zero-length.
+
+	case Subscriber:
+		objType = OBJ_SUBSCRIBER
+		cmdType = v.effectiveCmd()
+		if !v.cmdValid() {
+			return nil, errors.New("subscriber: invalid cmd_type")
+		}
+		sender = v.SenderAddress
+		arg1, arg2, arg3 = v.Route, v.Channel, v.Address
+
+	case Globals:
+		objType = OBJ_GLOBALS
+		cmdType = v.effectiveCmd()
+		if !v.cmdValid() {
+			return nil, errors.New("globals: invalid cmd_type")
+		}
+		sender = v.SenderAddress
+		// Build JSON map only for populated fields (like Python).
+		data := make(map[string]any)
+		if v.Values.Address != "" {
+			data["address"] = v.Values.Address
+		}
+		if v.Values.Port > 0 && v.Values.Port < 65536 {
+			data["port"] = v.Values.Port
+		}
+		if v.Values.Verbosity >= 0 && v.Values.Verbosity < 4 {
+			data["verbosity"] = v.Values.Verbosity
+		}
+		if v.Values.PrintTree != nil {
+			data["print_tree"] = *v.Values.PrintTree
+		}
+		if v.Values.TransformTimeout != "" {
+			data["transform_timeout"] = v.Values.TransformTimeout
+		}
+		if len(data) == 0 {
+			return nil, errors.New("globals: no valid fields to encode")
+		}
+		j, err := json.Marshal(data)
+		if err != nil {
+			return nil, fmt.Errorf("globals: marshal: %w", err)
+		}
+		payloadBytes = j
+
+	default:
+		return nil, fmt.Errorf("unsupported object type %T", obj)
+	}
+
+	if sender == "" {
+		return nil, errors.New("sender address is required")
+	}
+	// Required args for message/subscriber/transformer.
+	needsArgs := objType == OBJ_MESSAGE || objType == OBJ_SUBSCRIBER || objType == OBJ_TRANSFORMER
+	if needsArgs && arg1 == "" {
+		return nil, fmt.Errorf("object %d requires arg1", objType)
+	}
+
+	// Build the inner packet (without the u32 length prefix).
+	body := bytes.NewBuffer(nil)
+
+	// Fixed header
+	putU8(body, API_PROTOCOL_VER)
+	putU8(body, objType)
+	putU8(body, cmdType)
+
+	// Tracking sub-header
+	_ = pstr8(body, uuid.NewString()) // u8-len UID
+	if err := pstr16(body, sender); err != nil {
+		return nil, err
+	}
+
+	// Args (four u8-len strings)
+	if err := pstr8(body, arg1); err != nil {
+		return nil, err
+	}
+	if err := pstr8(body, arg2); err != nil {
+		return nil, err
+	}
+	if err := pstr8(body, arg3); err != nil {
+		return nil, err
+	}
+	if err := pstr8(body, arg4); err != nil {
+		return nil, err
+	}
+
+	// Payload (u16-len bytes)
+	if err := pbytes16(body, payloadBytes); err != nil {
+		return nil, err
+	}
+
+	// Prefix with total length (u32 big-endian).
+	full := bytes.NewBuffer(nil)
+	putU32(full, uint32(body.Len()))
+	full.Write(body.Bytes())
+	return full.Bytes(), nil
+}
+
+// Send connects to address:port and transmits the encoded frame.
+func Send(obj any, address string, port int) error {
+	frame, err := Encode(obj)
 	if err != nil {
 		return err
 	}
-
 	conn, err := net.Dial("tcp", net.JoinHostPort(address, strconv.Itoa(port)))
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
-
-	// Ensure full send.
 	_, err = conn.Write(frame)
 	return err
 }
 
-// GetLocalIPv4 returns the primary local IPv4, or 127.0.0.1 on failure.
+// -----------------------------------------------------------------------------
+// Listener (blocking start/stop, like MyceliaListener in Python).
+// -----------------------------------------------------------------------------
+
+// Processor returns an optional response. If nil, no response is sent.
+type Processor func(payload []byte) []byte
+
+type MyceliaListener struct {
+	localAddr string
+	localPort int
+	process   Processor
+
+	ln   net.Listener
+	stop chan struct{}
+}
+
+func NewMyceliaListener(
+	processor Processor,
+	localAddr string,
+	localPort int) *MyceliaListener {
+	return &MyceliaListener{
+		localAddr: localAddr,
+		localPort: localPort,
+		process:   processor,
+		stop:      make(chan struct{}),
+	}
+}
+
+// Start blocks, accepting and handling connections until Stop is called.
+func (ml *MyceliaListener) Start() error {
+	ln, err := net.Listen("tcp", fmt.Sprintf("%s:%d", ml.localAddr, ml.localPort))
+	if err != nil {
+		return err
+	}
+	ml.ln = ln
+	defer ln.Close()
+
+	for {
+		// Use deadline to periodically check stop channel.
+		if tcpln, ok := ln.(*net.TCPListener); ok {
+			_ = tcpln.SetDeadline(time.Now().Add(1 * time.Second))
+		}
+		conn, err := ln.Accept()
+		select {
+		case <-ml.stop:
+			return nil
+		default:
+		}
+		if err != nil {
+			// Deadline or closed listener?
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				continue
+			}
+			// If Stop closed the listener, exit cleanly.
+			if errors.Is(err, net.ErrClosed) {
+				return nil
+			}
+			// Other transient accept errors: continue.
+			continue
+		}
+		go ml.handleConn(conn)
+	}
+}
+
+func (ml *MyceliaListener) handleConn(conn net.Conn) {
+	defer conn.Close()
+	buf := make([]byte, 1024)
+	for {
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		n, err := conn.Read(buf)
+		if n == 0 && err != nil {
+			return
+		}
+		payload := append([]byte(nil), buf[:n]...)
+		reply := ml.process(payload)
+		if reply != nil {
+			_, _ = conn.Write(reply)
+		}
+	}
+}
+
+// Stop unblocks Start by closing the listener.
+func (ml *MyceliaListener) Stop() {
+	select {
+	case <-ml.stop:
+		// already stopped
+	default:
+		close(ml.stop)
+	}
+	if ml.ln != nil {
+		_ = ml.ln.Close()
+	}
+}
+
+// GetLocalIPv4 returns the primary outbound IPv4 (fallback 127.0.0.1).
 func GetLocalIPv4() string {
-	// Trick: connect UDP to a non-routable address, then read the local addr.
 	conn, err := net.Dial("udp", "10.255.255.255:1")
 	if err != nil {
 		return "127.0.0.1"
 	}
 	defer conn.Close()
-	local := conn.LocalAddr()
-	udpAddr, ok := local.(*net.UDPAddr)
-	if !ok || udpAddr.IP == nil {
-		return "127.0.0.1"
-	}
-	return udpAddr.IP.String()
-}
-
-type MyceliaListener struct {
-	LocalAddr string
-	LocalPort int
-	// If the processor returns (reply, true), the reply is sent back to the
-	// client, if it returns (_, false), no reply is sent.
-	MessageProcessor func([]byte) ([]byte, bool)
-
-	stop chan struct{}
-	ln   *net.TCPListener
-}
-
-// NewMyceliaListener constructs a listener.
-func NewMyceliaListener(
-	proc func([]byte) ([]byte, bool),
-	localAddr string,
-	localPort int,
-) *MyceliaListener {
-	if localAddr == "" {
-		localAddr = GetLocalIPv4()
-	}
-	if localPort == 0 {
-		localPort = 5500
-	}
-	return &MyceliaListener{
-		LocalAddr:        localAddr,
-		LocalPort:        localPort,
-		MessageProcessor: proc,
-		stop:             make(chan struct{}),
-	}
-}
-
-// Start blocks, accepting connections and forwarding received chunks
-// to MessageProcessor; if it returns (reply, true) we write the reply back.
-func (l *MyceliaListener) Start() error {
-	addr := fmt.Sprintf("%s:%d", l.LocalAddr, l.LocalPort)
-	rawLn, err := net.Listen("tcp", addr)
-	if err != nil {
-		return err
-	}
-	tcpLn := rawLn.(*net.TCPListener)
-	l.ln = tcpLn
-
-	fmt.Printf("Listening on %s\n", addr)
-
-	for {
-		// Make Accept interruptible via deadline so we can check stop signal.
-		_ = tcpLn.SetDeadline(time.Now().Add(1 * time.Second))
-
-		conn, err := tcpLn.Accept()
-		if err != nil {
-			// Check if deadline or closed
-			if ne, ok := err.(net.Error); ok && ne.Timeout() {
-				select {
-				case <-l.stop:
-					return nil
-				default:
-					continue
-				}
-			}
-			// If listener was closed, exit gracefully.
-			select {
-			case <-l.stop:
-				return nil
-			default:
-				// Unexpected error
-				return err
-			}
-		}
-
-		go func(c net.Conn) {
-			defer c.Close()
-			fmt.Printf("Connected by %s\n", c.RemoteAddr())
-
-			// Allocate a buffer per-connection to avoid races across
-			// goroutines.
-			buf := make([]byte, 1024)
-
-			for {
-				n, rerr := c.Read(buf)
-				if n > 0 && l.MessageProcessor != nil {
-					reply, ok := l.MessageProcessor(buf[:n])
-					if ok {
-						// Note: writing zero bytes is a no-op, which is fine.
-						if _, werr := c.Write(reply); werr != nil {
-							return
-						}
-					}
-				}
-				if rerr != nil {
-					if errors.Is(rerr, io.EOF) {
-						return
-					}
-					// Any other read error ends the connection loop
-					return
-				}
-			}
-		}(conn)
-	}
-}
-
-// Stop signals the listener to stop and closes the socket.
-func (l *MyceliaListener) Stop() {
-	select {
-	case <-l.stop:
-		// already stopped
-	default:
-		close(l.stop)
-	}
-	if l.ln != nil {
-		_ = l.ln.Close()
-	}
+	localAddr := conn.LocalAddr().(*net.UDPAddr)
+	return localAddr.IP.String()
 }
