@@ -44,7 +44,7 @@ type Command interface {
 
 // Message sends a payload over a route.
 type Message struct {
-	SenderAddress string
+	ReturnAddress string
 	Route         string
 	Payload       []byte
 	// Optional: override, defaults to CMD_SEND if zero.
@@ -61,7 +61,7 @@ func (m Message) EffectiveCmd() uint8 {
 
 // Transformer registers/unregisters a transformer at a channel.
 type Transformer struct {
-	SenderAddress string
+	ReturnAddress string
 	Route         string
 	Channel       string
 	Address       string
@@ -82,7 +82,7 @@ func (t Transformer) EffectiveCmd() uint8 {
 
 // Subscriber registers/unregisters a subscriber at a channel.
 type Subscriber struct {
-	SenderAddress string
+	ReturnAddress string
 	Route         string
 	Channel       string
 	Address       string
@@ -113,7 +113,7 @@ type GlobalValues struct {
 
 // Globals updates broker globals.
 type Globals struct {
-	SenderAddress string
+	ReturnAddress string
 	Values        GlobalValues
 	// Optional: override, defaults to CMD_UPDATE if zero.
 	CmdType uint8
@@ -177,12 +177,12 @@ func pbytes16(buf *bytes.Buffer, b []byte) error {
 // -------Frame builder---------------------------------------------------------
 
 type frame struct {
-	objType      uint8
-	cmdType      uint8
-	sender       string
-	arg1, arg2   string
-	arg3, arg4   string
-	payloadBytes []byte
+	objType       uint8
+	cmdType       uint8
+	returnAddress string
+	arg1, arg2    string
+	arg3, arg4    string
+	payloadBytes  []byte
 }
 
 func encodeMessage(msg Message) (*frame, error) {
@@ -193,10 +193,10 @@ func encodeMessage(msg Message) (*frame, error) {
 		return nil, errors.New("message: invalid cmd_type")
 	}
 
-	if f.sender == "" {
+	if f.returnAddress == "" {
 		return nil, errors.New("sender address is required")
 	}
-	f.sender = msg.SenderAddress
+	f.returnAddress = msg.ReturnAddress
 
 	f.arg1 = msg.Route
 	f.arg2 = ""
@@ -216,10 +216,10 @@ func encodeTransformer(tfr Transformer) (*frame, error) {
 		return nil, errors.New("transformer: invalid cmd_type")
 	}
 
-	if f.sender == "" {
+	if f.returnAddress == "" {
 		return nil, errors.New("sender address is required")
 	}
-	f.sender = tfr.SenderAddress
+	f.returnAddress = tfr.ReturnAddress
 
 	f.arg1, f.arg2, f.arg3, f.arg4 = tfr.Route, tfr.Channel, tfr.Address, ""
 
@@ -234,10 +234,10 @@ func encodeSubscriber(sub Subscriber) (*frame, error) {
 		return nil, errors.New("subscriber: invalid cmd_type")
 	}
 
-	if f.sender == "" {
+	if f.returnAddress == "" {
 		return nil, errors.New("sender address is required")
 	}
-	f.sender = sub.SenderAddress
+	f.returnAddress = sub.ReturnAddress
 
 	f.arg1, f.arg2, f.arg3, f.arg4 = sub.Route, sub.Channel, sub.Address, ""
 
@@ -252,10 +252,10 @@ func encodeGlobals(glb Globals) (*frame, error) {
 		return nil, errors.New("globals: invalid cmd_type")
 	}
 
-	if f.sender == "" {
+	if f.returnAddress == "" {
 		return nil, errors.New("sender address is required")
 	}
-	f.sender = glb.SenderAddress
+	f.returnAddress = glb.ReturnAddress
 
 	f.arg1, f.arg2, f.arg3, f.arg4 = "", "", "", ""
 
@@ -340,7 +340,7 @@ func encodeFrame(f *frame) ([]byte, error) {
 
 	// -----Tracking sub-header-----
 	_ = pstr8(body, uuid.NewString())
-	if err := pstr16(body, f.sender); err != nil {
+	if err := pstr16(body, f.returnAddress); err != nil {
 		return nil, err
 	}
 
