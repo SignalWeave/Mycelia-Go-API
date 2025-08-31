@@ -278,10 +278,10 @@ func encodeGlobals(glb Globals) (*frame, error) {
 		return nil, errors.New("globals: invalid cmd_type")
 	}
 
-	if f.returnAddress == "" {
+	if glb.ReturnAddress == "" {
 		return nil, errors.New("sender address is required")
 	}
-	glb.ReturnAddress = glb.ReturnAddress
+	f.returnAddress = glb.ReturnAddress
 
 	f.arg1, f.arg2, f.arg3, f.arg4 = "", "", "", ""
 
