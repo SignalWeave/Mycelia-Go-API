@@ -18,15 +18,22 @@ const (
 	OBJ_MESSAGE     uint8 = 1
 	OBJ_TRANSFORMER uint8 = 2
 	OBJ_SUBSCRIBER  uint8 = 3
-	OBJ_GLOBALS     uint8 = 4
+
+	OBJ_GLOBALS uint8 = 20
+
+	OBJ_ACTION uint8 = 50
 )
 
 const (
 	_CMD_UNKNOWN uint8 = 0
-	CMD_SEND     uint8 = 1
-	CMD_ADD      uint8 = 2
-	CMD_REMOVE   uint8 = 3
-	CMD_UPDATE   uint8 = 4
+
+	CMD_SEND   uint8 = 1
+	CMD_ADD    uint8 = 2
+	CMD_REMOVE uint8 = 3
+
+	CMD_UPDATE uint8 = 20
+
+	CMD_SIGTERM uint8 = 50
 )
 
 const (
@@ -102,6 +109,7 @@ func (s Subscriber) EffectiveCmd() uint8 {
 }
 
 type GlobalValues struct {
+	ReturnAddress    string
 	SecurityToken    string
 	Address          string // '' = ignore
 	Port             int    // 0..65535 valid; others ignored
@@ -125,6 +133,24 @@ func (g Globals) EffectiveCmd() uint8 {
 		return g.CmdType
 	}
 	return CMD_UPDATE
+}
+
+// Actions invoke application level commands of the broker.
+type Action struct {
+	ReturnAddress string
+	// Optional: override, defaults to CMD_SIGTERM if zero.
+	CmdType uint8
+}
+
+func (a Action) CmdValid() bool {
+	c := a.EffectiveCmd()
+	return c == CMD_SIGTERM
+}
+func (a Action) EffectiveCmd() uint8 {
+	if a.CmdType != _CMD_UNKNOWN {
+		return a.CmdType
+	}
+	return CMD_SIGTERM
 }
 
 // -------Encoding helpers (big-endian)-----------------------------------------
@@ -193,7 +219,7 @@ func encodeMessage(msg Message) (*frame, error) {
 		return nil, errors.New("message: invalid cmd_type")
 	}
 
-	if f.returnAddress == "" {
+	if msg.ReturnAddress == "" {
 		return nil, errors.New("sender address is required")
 	}
 	f.returnAddress = msg.ReturnAddress
@@ -216,7 +242,7 @@ func encodeTransformer(tfr Transformer) (*frame, error) {
 		return nil, errors.New("transformer: invalid cmd_type")
 	}
 
-	if f.returnAddress == "" {
+	if tfr.ReturnAddress == "" {
 		return nil, errors.New("sender address is required")
 	}
 	f.returnAddress = tfr.ReturnAddress
@@ -234,7 +260,7 @@ func encodeSubscriber(sub Subscriber) (*frame, error) {
 		return nil, errors.New("subscriber: invalid cmd_type")
 	}
 
-	if f.returnAddress == "" {
+	if sub.ReturnAddress == "" {
 		return nil, errors.New("sender address is required")
 	}
 	f.returnAddress = sub.ReturnAddress
@@ -255,7 +281,7 @@ func encodeGlobals(glb Globals) (*frame, error) {
 	if f.returnAddress == "" {
 		return nil, errors.New("sender address is required")
 	}
-	f.returnAddress = glb.ReturnAddress
+	glb.ReturnAddress = glb.ReturnAddress
 
 	f.arg1, f.arg2, f.arg3, f.arg4 = "", "", "", ""
 
@@ -293,6 +319,24 @@ func encodeGlobals(glb Globals) (*frame, error) {
 	return f, nil
 }
 
+func encodeAction(act Action) (*frame, error) {
+	f := &frame{}
+	f.objType = OBJ_ACTION
+	f.cmdType = act.EffectiveCmd()
+	if !act.CmdValid() {
+		return nil, errors.New("action: invalid cmd_type")
+	}
+
+	if act.ReturnAddress == "" {
+		return nil, errors.New("sender address is required")
+	}
+	f.returnAddress = act.ReturnAddress
+
+	f.arg1, f.arg2, f.arg3, f.arg4 = "", "", "", ""
+
+	return f, nil
+}
+
 func encode(cmd Command) ([]byte, error) {
 	var f *frame
 	var err error
@@ -315,6 +359,11 @@ func encode(cmd Command) ([]byte, error) {
 		}
 	case Globals:
 		f, err = encodeGlobals(v)
+		if err != nil {
+			return nil, err
+		}
+	case Action:
+		f, err = encodeAction(v)
 		if err != nil {
 			return nil, err
 		}
