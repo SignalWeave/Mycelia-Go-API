@@ -62,7 +62,7 @@ func (at ACK_TYPE) String() string {
 // message's UID.
 type Response struct {
 	UID string
-	ACK ACK_TYPE
+	Ack ACK_TYPE
 }
 
 // -------Decoding--------------------------------------------------------------
@@ -119,6 +119,6 @@ func recvAndDecode(conn net.Conn) (*Response, error) {
 
 	return &Response{
 		UID: uid,
-		ACK: ACK_TYPE(ack),
+		Ack: ACK_TYPE(ack),
 	}, nil
 }
