@@ -46,12 +46,19 @@ const (
 	// If no ack was gotten before the timeout time, a response with ACK_TIMEOUT
 	// is generated and returned instead.
 	ACK_TYPE_TIMEOUT ACK_TYPE = 10
+
+	ACK_CHANNEL_NOT_FOUND      ACK_TYPE = 20
+	ACK_CHANNEL_ALREADY_EXISTS ACK_TYPE = 21
+	ACK_ROUTE_NOT_FOUND        ACK_TYPE = 30
 )
 
 var ackTypeName = map[ACK_TYPE]string{
-	ACK_TYPE_UNKNOWN: "Unknown",
-	ACK_TYPE_SENT:    "Sent",
-	ACK_TYPE_TIMEOUT: "Timeout",
+	ACK_TYPE_UNKNOWN:           "Unknown",
+	ACK_TYPE_SENT:              "Sent",
+	ACK_TYPE_TIMEOUT:           "Timeout",
+	ACK_CHANNEL_NOT_FOUND:      "Channel not found",
+	ACK_CHANNEL_ALREADY_EXISTS: "Channel already exists",
+	ACK_ROUTE_NOT_FOUND:        "Route not found",
 }
 
 func (at ACK_TYPE) String() string {

@@ -17,6 +17,7 @@ const (
 	OBJ_MESSAGE     uint8 = 1
 	OBJ_TRANSFORMER uint8 = 2
 	OBJ_SUBSCRIBER  uint8 = 3
+	OBJ_CHANNEL     uint8 = 4
 
 	OBJ_GLOBALS uint8 = 20
 
@@ -50,14 +51,18 @@ type Command interface {
 
 // Message sends a payload over a route.
 type Message struct {
-	ReturnAddress string
-	Route         string
-	Payload       []byte
+	AckPolicy ACK_PLCY
+	Route     string
+	Payload   []byte
 	// Optional: override, defaults to CMD_SEND if zero.
 	CmdType uint8
 }
 
-func (m Message) CmdValid() bool { return m.EffectiveCmd() == CMD_SEND }
+func (m Message) CmdValid() bool {
+	c := m.EffectiveCmd()
+	return c == CMD_SEND
+}
+
 func (m Message) EffectiveCmd() uint8 {
 	if m.CmdType != _CMD_UNKNOWN {
 		return m.CmdType
@@ -67,10 +72,10 @@ func (m Message) EffectiveCmd() uint8 {
 
 // Transformer registers/unregisters a transformer at a channel.
 type Transformer struct {
-	ReturnAddress string
-	Route         string
-	Channel       string
-	Address       string
+	AckPolicy ACK_PLCY
+	Route     string
+	Channel   string
+	Address   string
 	// Optional: override, defaults to CMD_ADD if zero.
 	CmdType uint8
 }
@@ -88,10 +93,10 @@ func (t Transformer) EffectiveCmd() uint8 {
 
 // Subscriber registers/unregisters a subscriber at a channel.
 type Subscriber struct {
-	ReturnAddress string
-	Route         string
-	Channel       string
-	Address       string
+	AckPolicy ACK_PLCY
+	Route     string
+	Channel   string
+	Address   string
 	// Optional: override, defaults to CMD_ADD if zero.
 	CmdType uint8
 }
@@ -108,7 +113,6 @@ func (s Subscriber) EffectiveCmd() uint8 {
 }
 
 type GlobalValues struct {
-	ReturnAddress    string
 	SecurityToken    string
 	Address          string // '' = ignore
 	Port             int    // 0..65535 valid; others ignored
@@ -120,13 +124,17 @@ type GlobalValues struct {
 
 // Globals updates broker globals.
 type Globals struct {
-	ReturnAddress string
-	Values        GlobalValues
+	AckPolicy ACK_PLCY
+	Values    GlobalValues
 	// Optional: override, defaults to CMD_UPDATE if zero.
 	CmdType uint8
 }
 
-func (g Globals) CmdValid() bool { return g.EffectiveCmd() == CMD_UPDATE }
+func (g Globals) CmdValid() bool {
+	c := g.EffectiveCmd()
+	return c == CMD_UPDATE
+}
+
 func (g Globals) EffectiveCmd() uint8 {
 	if g.CmdType != _CMD_UNKNOWN {
 		return g.CmdType
@@ -134,9 +142,31 @@ func (g Globals) EffectiveCmd() uint8 {
 	return CMD_UPDATE
 }
 
+type Channel struct {
+	AckPolicy ACK_PLCY
+	Route     string
+	Name      string
+	// Optional: override, defaults to SEL_STRAT_PUBSUB if zero.
+	SelectionStrategy SEL_STRAT
+	// Optional: override, defaults to CMD_ADD if zero.
+	CmdType uint8
+}
+
+func (c Channel) CmdValid() bool {
+	cmd := c.EffectiveCmd()
+	return cmd == CMD_ADD || cmd == CMD_REMOVE
+}
+
+func (c Channel) EffectiveCmd() uint8 {
+	if c.CmdType != _CMD_UNKNOWN {
+		return c.CmdType
+	}
+	return CMD_ADD
+}
+
 // Actions invoke application level commands of the broker.
 type Action struct {
-	ReturnAddress string
+	AckPolicy ACK_PLCY
 	// Optional: override, defaults to CMD_SIGTERM if zero.
 	CmdType uint8
 }
@@ -180,16 +210,6 @@ func pstr8(buf *bytes.Buffer, s string) error {
 	return nil
 }
 
-func pstr16(buf *bytes.Buffer, s string) error {
-	b := []byte(s)
-	if len(b) > int(maxU16Len) {
-		return fmt.Errorf("string too long for u16 prefix: %d", len(b))
-	}
-	putU16(buf, uint16(len(b)))
-	buf.Write(b)
-	return nil
-}
-
 func pbytes16(buf *bytes.Buffer, b []byte) error {
 	if len(b) > int(maxU16Len) {
 		return fmt.Errorf("bytes too long for u16 prefix: %d", len(b))
@@ -202,12 +222,12 @@ func pbytes16(buf *bytes.Buffer, b []byte) error {
 // -------Frame builder---------------------------------------------------------
 
 type frame struct {
-	objType       uint8
-	cmdType       uint8
-	returnAddress string
-	arg1, arg2    string
-	arg3, arg4    string
-	payloadBytes  []byte
+	objType      uint8
+	cmdType      uint8
+	ackPlcy      uint8
+	arg1, arg2   string
+	arg3, arg4   string
+	payloadBytes []byte
 }
 
 func encodeMessage(msg Message) (*frame, error) {
@@ -217,11 +237,7 @@ func encodeMessage(msg Message) (*frame, error) {
 	if !msg.CmdValid() {
 		return nil, errors.New("message: invalid cmd_type")
 	}
-
-	if msg.ReturnAddress == "" {
-		return nil, errors.New("sender address is required")
-	}
-	f.returnAddress = msg.ReturnAddress
+	f.ackPlcy = uint8(msg.AckPolicy)
 
 	f.arg1 = msg.Route
 	f.arg2 = ""
@@ -240,11 +256,7 @@ func encodeTransformer(tfr Transformer) (*frame, error) {
 	if !tfr.CmdValid() {
 		return nil, errors.New("transformer: invalid cmd_type")
 	}
-
-	if tfr.ReturnAddress == "" {
-		return nil, errors.New("sender address is required")
-	}
-	f.returnAddress = tfr.ReturnAddress
+	f.ackPlcy = uint8(tfr.AckPolicy)
 
 	f.arg1, f.arg2, f.arg3, f.arg4 = tfr.Route, tfr.Channel, tfr.Address, ""
 
@@ -258,11 +270,7 @@ func encodeSubscriber(sub Subscriber) (*frame, error) {
 	if !sub.CmdValid() {
 		return nil, errors.New("subscriber: invalid cmd_type")
 	}
-
-	if sub.ReturnAddress == "" {
-		return nil, errors.New("sender address is required")
-	}
-	f.returnAddress = sub.ReturnAddress
+	f.ackPlcy = uint8(sub.AckPolicy)
 
 	f.arg1, f.arg2, f.arg3, f.arg4 = sub.Route, sub.Channel, sub.Address, ""
 
@@ -276,11 +284,7 @@ func encodeGlobals(glb Globals) (*frame, error) {
 	if !glb.CmdValid() {
 		return nil, errors.New("globals: invalid cmd_type")
 	}
-
-	if glb.ReturnAddress == "" {
-		return nil, errors.New("sender address is required")
-	}
-	f.returnAddress = glb.ReturnAddress
+	f.ackPlcy = uint8(glb.AckPolicy)
 
 	f.arg1, f.arg2, f.arg3, f.arg4 = "", "", "", ""
 
@@ -318,6 +322,21 @@ func encodeGlobals(glb Globals) (*frame, error) {
 	return f, nil
 }
 
+func encodeChannel(ch Channel) (*frame, error) {
+	f := &frame{}
+	f.objType = OBJ_CHANNEL
+	f.cmdType = ch.EffectiveCmd()
+	if !ch.CmdValid() {
+		return nil, errors.New("channel: invalid cmd_type")
+	}
+	f.ackPlcy = uint8(ch.AckPolicy)
+
+	f.arg1, f.arg2 = ch.Route, ch.Name
+	f.arg3, f.arg4 = ch.SelectionStrategy.String(), ""
+
+	return f, nil
+}
+
 func encodeAction(act Action) (*frame, error) {
 	f := &frame{}
 	f.objType = OBJ_ACTION
@@ -325,11 +344,7 @@ func encodeAction(act Action) (*frame, error) {
 	if !act.CmdValid() {
 		return nil, errors.New("action: invalid cmd_type")
 	}
-
-	if act.ReturnAddress == "" {
-		return nil, errors.New("sender address is required")
-	}
-	f.returnAddress = act.ReturnAddress
+	f.ackPlcy = uint8(act.AckPolicy)
 
 	f.arg1, f.arg2, f.arg3, f.arg4 = "", "", "", ""
 
@@ -361,6 +376,11 @@ func encode(cmd Command) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
+	case Channel:
+		f, err = encodeChannel(v)
+		if err != nil {
+			return nil, err
+		}
 	case Action:
 		f, err = encodeAction(v)
 		if err != nil {
@@ -388,9 +408,6 @@ func encodeFrame(f *frame) ([]byte, error) {
 
 	// -----Tracking sub-header-----
 	_ = pstr8(body, uuid.NewString())
-	if err := pstr16(body, f.returnAddress); err != nil {
-		return nil, err
-	}
 
 	// -----Arguments-----
 	needsArgs := []uint8{OBJ_MESSAGE, OBJ_SUBSCRIBER, OBJ_TRANSFORMER}
