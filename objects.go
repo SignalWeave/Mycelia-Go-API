@@ -42,6 +42,9 @@ const (
 	maxU16Len        uint32 = 65535
 )
 
+// DEAD_LETTER is used for subscribing to dead letter channels.
+const DEAD_LETTER = "deadLetter"
+
 // -------Public message types--------------------------------------------------
 
 type Command interface {
@@ -164,7 +167,7 @@ func (c Channel) EffectiveCmd() uint8 {
 	return CMD_ADD
 }
 
-// Actions invoke application level commands of the broker.
+// Action invokes application level commands of the broker.
 type Action struct {
 	AckPolicy ACK_PLCY
 	// Optional: override, defaults to CMD_SIGTERM if zero.
@@ -412,7 +415,7 @@ func encodeFrame(f *frame) ([]byte, error) {
 	// -----Arguments-----
 	needsArgs := []uint8{OBJ_MESSAGE, OBJ_SUBSCRIBER, OBJ_TRANSFORMER}
 	if slices.Contains(needsArgs, f.objType) && f.arg1 == "" {
-		return nil, errors.New("Message has incomplete args")
+		return nil, errors.New("message has incomplete args")
 	}
 
 	if err := pstr8(body, f.arg1); err != nil {
